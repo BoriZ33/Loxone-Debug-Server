@@ -1622,31 +1622,29 @@ def einstellungen():
     <div class="card">
       <div class="card-header"><h2>{t('settings_params')}</h2></div>
       <div class="card-body">
-        <form method="post">
-          <div class="form-row">
-            <div class="form-group">
-              <label>{t('settings_http_port')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_http_port_hint')}</span></label>
-              <input type="number" name="http_port" value="{cfg['http_port']}" min="1" max="65535" required>
-            </div>
-            <div class="form-group">
-              <label>{t('settings_udp_port')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_udp_port_hint')}</span></label>
-              <input type="number" name="udp_port" value="{cfg['udp_port']}" min="1" max="65535" required>
-            </div>
-            <div class="form-group">
-              <label>{t('settings_timeout')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_timeout_hint')}</span></label>
-              <input type="number" name="stream_timeout" value="{cfg['stream_timeout']}" min="1" max="3600" required>
-            </div>
-            <div class="form-group">
-              <label>{t('settings_auto_delete')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_auto_delete_hint')}</span></label>
-              <input type="number" name="auto_delete_days" value="{auto_del_val}" min="0" max="3650" required>
-            </div>
-            <div class="form-group">
-              <label>{t('settings_max_storage')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_max_storage_hint')}</span></label>
-              <input type="number" name="max_storage_gb" value="{max_store_val}" min="0" max="10000" step="0.1" required>
-            </div>
-            <div class="form-group" style="justify-content:flex-end">
-              <button class="btn btn-primary">{t('btn_save')}</button>
-            </div>
+        <form method="post" style="max-width:480px">
+          <div class="form-group" style="margin-bottom:18px">
+            <label>{t('settings_http_port')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_http_port_hint')}</span></label>
+            <input type="number" name="http_port" value="{cfg['http_port']}" min="1" max="65535" required>
+          </div>
+          <div class="form-group" style="margin-bottom:18px">
+            <label>{t('settings_udp_port')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_udp_port_hint')}</span></label>
+            <input type="number" name="udp_port" value="{cfg['udp_port']}" min="1" max="65535" required>
+          </div>
+          <div class="form-group" style="margin-bottom:18px">
+            <label>{t('settings_timeout')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_timeout_hint')}</span></label>
+            <input type="number" name="stream_timeout" value="{cfg['stream_timeout']}" min="1" max="3600" required>
+          </div>
+          <div class="form-group" style="margin-bottom:18px">
+            <label>{t('settings_auto_delete')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_auto_delete_hint')}</span></label>
+            <input type="number" name="auto_delete_days" value="{auto_del_val}" min="0" max="3650" required>
+          </div>
+          <div class="form-group" style="margin-bottom:28px">
+            <label>{t('settings_max_storage')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_max_storage_hint')}</span></label>
+            <input type="number" name="max_storage_gb" value="{max_store_val}" min="0" max="10000" step="0.1" required>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary">{t('btn_save')}</button>
           </div>
         </form>
       </div>
