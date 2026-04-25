@@ -56,7 +56,7 @@ def add_audit(action: str, detail: str = "", user: str = None):
         AUDIT_FILE.write_text(json.dumps(log, indent=2), encoding="utf-8")
 
 # ── Einstellungen ─────────────────────────────────────────────────────────
-_SETTINGS_DEFAULTS = {"http_port": 8080, "udp_port": 7777, "stream_timeout": 30, "auto_delete_days": 0, "max_storage_mb": 0}
+_SETTINGS_DEFAULTS = {"http_port": 8080, "udp_port": 7777, "stream_timeout": 30, "auto_delete_days": 0, "max_storage_gb": 0}
 
 def load_settings() -> dict:
     if not SETTINGS_FILE.exists():
@@ -139,13 +139,13 @@ TRANSLATIONS = {
         "settings_udp_port": "UDP Port", "settings_udp_port_hint": "(Miniserver Debug-Stream, Neustart erforderlich)",
         "settings_timeout": "Stream Timeout", "settings_timeout_hint": "(Sekunden ohne Daten → Stream gilt als beendet, sofort aktiv)",
         "settings_auto_delete": "Automatisch löschen nach", "settings_auto_delete_hint": "(Tage nach Stream-Ende, 0 = deaktiviert, sofort aktiv)",
-        "settings_max_storage": "Maximaler Speicherbedarf", "settings_max_storage_hint": "(MB, 0 = deaktiviert — älteste Ordner werden automatisch gelöscht, sofort aktiv)",
+        "settings_max_storage": "Maximaler Speicherbedarf", "settings_max_storage_hint": "(GB, 0 = deaktiviert — älteste Ordner werden automatisch gelöscht, sofort aktiv)",
         "settings_current": "Aktuelle Werte", "settings_timeout_lbl": "Timeout",
         "settings_auto_delete_lbl": "Auto-Löschen", "settings_auto_delete_off": "Aus",
         "settings_max_storage_lbl": "Max. Speicher", "settings_max_storage_off": "Aus",
         "settings_restart_title": "Server-Neustart",
         "settings_restart_desc": "Startet den Server-Prozess neu. Alle aktiven Streams werden kurz unterbrochen. Port-Änderungen werden erst nach einem Neustart wirksam.",
-        "settings_err": "Ungültige Eingabe. Ports: 1–65535, Timeout: 1–3600 s, Auto-Löschen: ≥ 0, Max. Speicher: ≥ 0.",
+        "settings_err": "Ungültige Eingabe. Ports: 1–65535, Timeout: 1–3600 s, Auto-Löschen: ≥ 0, Max. Speicher: ≥ 0 GB.",
         "settings_saved": "Einstellungen gespeichert.",
         "settings_saved_restart": "Einstellungen gespeichert. Port-Änderungen werden erst nach Neustart des Servers wirksam.",
         "settings_no_change": "Keine Änderungen.",
@@ -240,13 +240,13 @@ TRANSLATIONS = {
         "settings_udp_port": "UDP Port", "settings_udp_port_hint": "(Miniserver debug stream, restart required)",
         "settings_timeout": "Stream Timeout", "settings_timeout_hint": "(seconds without data → stream considered ended, effective immediately)",
         "settings_auto_delete": "Auto-delete after", "settings_auto_delete_hint": "(days after stream end, 0 = disabled, effective immediately)",
-        "settings_max_storage": "Maximum storage", "settings_max_storage_hint": "(MB, 0 = disabled — oldest folders are deleted automatically, effective immediately)",
+        "settings_max_storage": "Maximum storage", "settings_max_storage_hint": "(GB, 0 = disabled — oldest folders are deleted automatically, effective immediately)",
         "settings_current": "Current Values", "settings_timeout_lbl": "Timeout",
         "settings_auto_delete_lbl": "Auto-Delete", "settings_auto_delete_off": "Off",
         "settings_max_storage_lbl": "Max. Storage", "settings_max_storage_off": "Off",
         "settings_restart_title": "Server Restart",
         "settings_restart_desc": "Restarts the server process. Active streams will be briefly interrupted. Port changes only take effect after a restart.",
-        "settings_err": "Invalid input. Ports: 1–65535, Timeout: 1–3600 s, Auto-delete: ≥ 0, Max. storage: ≥ 0.",
+        "settings_err": "Invalid input. Ports: 1–65535, Timeout: 1–3600 s, Auto-delete: ≥ 0, Max. storage: ≥ 0 GB.",
         "settings_saved": "Settings saved.",
         "settings_saved_restart": "Settings saved. Port changes will take effect after a server restart.",
         "settings_no_change": "No changes.",
@@ -439,10 +439,10 @@ def _auto_cleanup():
             print(f"[AUTO] Fehler beim Löschen {d.name}: {e}")
 
 def _storage_cleanup():
-    limit_mb = load_settings().get("max_storage_mb", 0)
-    if limit_mb <= 0 or not LOG_BASE_DIR.exists():
+    limit_gb = load_settings().get("max_storage_gb", 0)
+    if limit_gb <= 0 or not LOG_BASE_DIR.exists():
         return
-    limit_bytes = limit_mb * 1024 * 1024
+    limit_bytes = limit_gb * 1024 * 1024 * 1024
     with _lock:
         active_folders = {s.get("folder") for s in active_streams.values()}
     while True:
@@ -459,9 +459,9 @@ def _storage_cleanup():
         try:
             shutil.rmtree(oldest)
             add_audit("Speicherlimit: gelöscht",
-                      f"{oldest.name} ({fmt_bytes(total)} > {limit_mb} MB)",
+                      f"{oldest.name} ({fmt_bytes(total)} > {limit_gb} GB)",
                       user="System")
-            print(f"[STORAGE] Ordner gelöscht: {oldest.name} (Limit: {limit_mb} MB)")
+            print(f"[STORAGE] Ordner gelöscht: {oldest.name} (Limit: {limit_gb} GB)")
         except Exception as e:
             print(f"[STORAGE] Fehler beim Löschen {oldest.name}: {e}")
             break
@@ -1584,7 +1584,7 @@ def einstellungen():
             udp_port    = int(request.form.get("udp_port",         cfg["udp_port"]))
             timeout     = int(request.form.get("stream_timeout",   cfg["stream_timeout"]))
             auto_delete = int(request.form.get("auto_delete_days", cfg["auto_delete_days"]))
-            max_storage = int(request.form.get("max_storage_mb",   cfg.get("max_storage_mb", 0)))
+            max_storage = float(request.form.get("max_storage_gb",  cfg.get("max_storage_gb", 0)))
             if not (1 <= http_port <= 65535 and 1 <= udp_port <= 65535):
                 raise ValueError
             if not (1 <= timeout <= 3600) or auto_delete < 0 or max_storage < 0:
@@ -1595,15 +1595,15 @@ def einstellungen():
 
         cfg = {"http_port": http_port, "udp_port": udp_port,
                "stream_timeout": timeout, "auto_delete_days": auto_delete,
-               "max_storage_mb": max_storage}
+               "max_storage_gb": max_storage}
         save_settings(cfg)
 
         changes = []
-        if old_cfg["http_port"]                    != http_port:   changes.append(f"HTTP Port {old_cfg['http_port']} → {http_port}");                    port_changed = True
-        if old_cfg["udp_port"]                     != udp_port:    changes.append(f"UDP Port {old_cfg['udp_port']} → {udp_port}");                       port_changed = True
-        if old_cfg["stream_timeout"]               != timeout:     changes.append(f"Timeout {old_cfg['stream_timeout']} → {timeout} s")
-        if old_cfg["auto_delete_days"]             != auto_delete: changes.append(f"Auto-Delete {old_cfg['auto_delete_days']} → {auto_delete} d")
-        if old_cfg.get("max_storage_mb", 0)        != max_storage: changes.append(f"Max. Speicher {old_cfg.get('max_storage_mb', 0)} → {max_storage} MB")
+        if old_cfg["http_port"]                   != http_port:   changes.append(f"HTTP Port {old_cfg['http_port']} → {http_port}");                   port_changed = True
+        if old_cfg["udp_port"]                    != udp_port:    changes.append(f"UDP Port {old_cfg['udp_port']} → {udp_port}");                      port_changed = True
+        if old_cfg["stream_timeout"]              != timeout:     changes.append(f"Timeout {old_cfg['stream_timeout']} → {timeout} s")
+        if old_cfg["auto_delete_days"]            != auto_delete: changes.append(f"Auto-Delete {old_cfg['auto_delete_days']} → {auto_delete} d")
+        if old_cfg.get("max_storage_gb", 0)       != max_storage: changes.append(f"Max. Speicher {old_cfg.get('max_storage_gb', 0)} → {max_storage} GB")
 
         if changes:
             add_audit(t("audit_settings"), "; ".join(changes))
@@ -1613,13 +1613,13 @@ def einstellungen():
         return redirect(url_for("einstellungen"))
 
     auto_del_val  = cfg.get("auto_delete_days", 0)
-    max_store_val = cfg.get("max_storage_mb", 0)
+    max_store_val = cfg.get("max_storage_gb", 0)
     body = f"""
     <div class="page-header">
       <h1>{t('settings_title')}</h1>
       <p>{t('settings_subtitle')}</p>
     </div>
-    <div class="card" style="max-width:560px">
+    <div class="card" style="max-width:560px;margin:0 auto">
       <div class="card-header"><h2>{t('settings_params')}</h2></div>
       <div class="card-body">
         <form method="post">
@@ -1641,7 +1641,7 @@ def einstellungen():
           </div>
           <div class="form-group" style="margin-bottom:24px">
             <label>{t('settings_max_storage')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_max_storage_hint')}</span></label>
-            <input type="number" name="max_storage_mb" value="{max_store_val}" min="0" max="1000000" required>
+            <input type="number" name="max_storage_gb" value="{max_store_val}" min="0" max="10000" step="0.1" required>
           </div>
           <div class="actions">
             <button class="btn btn-primary">{t('btn_save')}</button>
@@ -1649,9 +1649,9 @@ def einstellungen():
         </form>
       </div>
     </div>
-    <div class="card" style="max-width:560px;margin-top:16px">
+    <div class="card" style="max-width:680px;margin:16px auto 0">
       <div class="card-header"><h2>{t('settings_current')}</h2></div>
-      <div class="card-body" style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px">
+      <div class="card-body" style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px">
         <div class="stat-card accent"><div class="val">{cfg['http_port']}</div><div class="lbl">HTTP Port</div></div>
         <div class="stat-card accent"><div class="val">{cfg['udp_port']}</div><div class="lbl">UDP Port</div></div>
         <div class="stat-card accent"><div class="val">{cfg['stream_timeout']} s</div><div class="lbl">{t('settings_timeout_lbl')}</div></div>
@@ -1660,12 +1660,12 @@ def einstellungen():
           <div class="lbl">{t('settings_auto_delete_lbl')}</div>
         </div>
         <div class="stat-card {'accent' if max_store_val > 0 else ''}">
-          <div class="val" style="font-size:20px">{f'{max_store_val} MB' if max_store_val > 0 else t('settings_max_storage_off')}</div>
+          <div class="val" style="font-size:20px">{f'{max_store_val:g} GB' if max_store_val > 0 else t('settings_max_storage_off')}</div>
           <div class="lbl">{t('settings_max_storage_lbl')}</div>
         </div>
       </div>
     </div>
-    <div class="card" style="max-width:560px;margin-top:16px">
+    <div class="card" style="max-width:560px;margin:16px auto 0">
       <div class="card-header"><h2>{t('settings_restart_title')}</h2></div>
       <div class="card-body">
         <p style="font-size:13px;color:var(--muted);margin-bottom:16px">{t('settings_restart_desc')}</p>
