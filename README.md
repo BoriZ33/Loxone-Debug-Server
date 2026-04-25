@@ -3,7 +3,7 @@
 Ein lokaler Server zum Empfangen, Speichern und Anzeigen von Debug-Streams des Loxone Miniserver.  
 Daten werden per UDP empfangen und über ein Web-Interface im Browser verwaltet.
 
-![Loxone Debug Server](https://img.shields.io/badge/Version-1.02-69A533?style=flat-square)
+![Loxone Debug Server](https://img.shields.io/badge/Version-1.03-69A533?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/Flask-3.0+-000000?style=flat-square&logo=flask)
 
@@ -138,6 +138,7 @@ Konfiguration des Servers über das Web-Interface.
 | UDP Port | Port für eingehende Miniserver-Pakete (Standard: 7777) | ✅ |
 | Stream Timeout | Sekunden ohne Daten bis ein Stream als beendet gilt (Standard: 30) | ❌ |
 | Auto-Löschen | Ordner automatisch nach X Tagen löschen (0 = deaktiviert) | ❌ |
+| Maximaler Speicherbedarf | Gesamtgröße des Log-Ordners in GB begrenzen — älteste Ordner werden automatisch gelöscht sobald das Limit überschritten wird (0 = deaktiviert) | ❌ |
 
 Alle Änderungen werden im Verlauf protokolliert.
 
@@ -159,7 +160,8 @@ Vollständiges Protokoll aller Aktionen auf dem Server.
 | Stream beendet | Grau | System |
 | Download (Datei / ZIP) | Grün | Benutzer |
 | Datei / Ordner gelöscht | Rot | Benutzer |
-| Automatisch gelöscht | Rot | System |
+| Automatisch gelöscht (Auto-Löschen) | Rot | System |
+| Speicherlimit überschritten: gelöscht | Rot | System |
 | Benutzer angelegt / bearbeitet / gelöscht | — | Admin |
 | Einstellungen geändert | — | Admin |
 | Server-Neustart | Orange | Admin |
@@ -209,6 +211,12 @@ Im Loxone Config unter **Miniserver → Einstellungen → Logging & Monitoring**
 ---
 
 ## Changelog
+
+### V1.03
+- Neues Login- und Browser-Tab-Icon (Monogramm L/DS)
+- Neue Einstellung: Maximaler Speicherbedarf in GB — älteste Ordner werden automatisch gelöscht sobald das Limit überschritten wird
+- Speicherlöschungen werden im Verlauf protokolliert
+- Einstellungsseite: Layout überarbeitet (volle Breite, Felder untereinander)
 
 ### V1.02
 - Benutzeroberfläche vollständig auf Deutsch und Englisch übersetzt
