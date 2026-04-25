@@ -3,7 +3,7 @@
 Ein lokaler Server zum Empfangen, Speichern und Anzeigen von Debug-Streams des Loxone Miniserver.  
 Daten werden per UDP empfangen und über ein Web-Interface im Browser verwaltet.
 
-![Loxone Debug Server](https://img.shields.io/badge/Version-1.01-69A533?style=flat-square)
+![Loxone Debug Server](https://img.shields.io/badge/Version-1.02-69A533?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/Flask-3.0+-000000?style=flat-square&logo=flask)
 
@@ -45,6 +45,17 @@ python udp_logger.py
 ---
 
 ## Funktionen
+
+### Sprachauswahl
+
+Die Benutzeroberfläche ist vollständig auf **Deutsch** und **Englisch** verfügbar.
+
+- Sprachumschalter **DE / EN** direkt auf der Login-Seite (oben rechts)
+- Sprachumschalter **DE / EN** in der Navigation (oben rechts neben dem Benutzernamen)
+- Die gewählte Sprache bleibt auch nach dem Aus- und Einloggen erhalten
+- Standard: Deutsch
+
+---
 
 ### UDP-Empfang
 
@@ -194,6 +205,26 @@ Im Loxone Config unter **Miniserver → Einstellungen → Logging & Monitoring**
 - **Authentifizierung:** Session-basiert, Passwörter mit SHA-256 + zufälligem Salt gehasht
 - **Threading:** UDP-Listener und Stream-Monitor laufen als Daemon-Threads
 - **Pfadsicherheit:** Alle Dateizugriffe werden gegen Path-Traversal-Angriffe geprüft
+
+---
+
+## Changelog
+
+### V1.02
+- Benutzeroberfläche vollständig auf Deutsch und Englisch übersetzt
+- Sprachumschalter DE / EN auf der Login-Seite und in der Navigation
+- Sprachauswahl bleibt nach dem Logout erhalten
+
+### V1.01
+- Erstveröffentlichung
+- UDP-Empfang mit automatischer Dekodierung des Loxone-Binärprotokolls
+- Dashboard mit Echtzeit-Übersicht aller aktiven und beendeten Streams
+- Live-Stream Terminal mit Auto-Scroll
+- Datei-Browser mit ZIP-Download
+- Benutzerverwaltung mit zwei Rollen (Administrator / Benutzer)
+- Einstellungsseite (HTTP-Port, UDP-Port, Stream-Timeout, Auto-Löschen)
+- Server-Neustart über das Web-Interface
+- Verlauf / Audit-Log für alle Aktionen
 
 ---
 
