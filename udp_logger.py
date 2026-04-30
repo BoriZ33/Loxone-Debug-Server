@@ -418,6 +418,34 @@ def _is_valid_msg(text: str) -> bool:
     # Mindestens 8 Zeichen ODER mindestens ein Leerzeichen (echte Meldungen sind mehrteilig)
     return len(text) >= 8 or ' ' in text
 
+# ── Hilfsfunktion: Stream anhand der Anzeige-IP (intern) suchen ───────────
+def _stream_by_display_ip(display_ip: str):
+    """Gibt das Stream-Dict zurück, das s['ip'] == display_ip hat (oder None)."""
+    for s in active_streams.values():
+        if s["ip"] == display_ip:
+            return s
+    return None
+
+# ── Interne Miniserver-IP aus UDP-Paket extrahieren ───────────────────────
+def extract_miniserver_ip(data: bytes) -> str | None:
+    """Extrahiert die interne Miniserver-IP aus dem UDP-Paket-Header.
+
+    Der Loxone Miniserver bettet seine eigene (interne) IP in den Paket-Header ein.
+    Verifiziert via LxMon-Hex-Analyse: c0 a8 b2 d2 = 192.168.178.210 steht immer
+    innerhalb der ersten 80 Bytes vor dem Nachrichtentext.
+    Scannt die ersten 80 Bytes nach einer gültigen RFC1918 privaten IP-Adresse.
+    """
+    for i in range(min(80, len(data) - 3)):
+        b = data[i:i + 4]
+        # RFC1918: 192.168.x.x  |  10.x.x.x  |  172.16–31.x.x
+        if ((b[0] == 192 and b[1] == 168) or
+                b[0] == 10 or
+                (b[0] == 172 and 16 <= b[1] <= 31)):
+            # Letztes Byte darf nicht 0 (Netz) oder 255 (Broadcast) sein
+            if 1 <= b[3] <= 254:
+                return f"{b[0]}.{b[1]}.{b[2]}.{b[3]}"
+    return None
+
 # ── Startup: vorhandene Log-Ordner als beendete Sessions laden ────────────
 def _load_existing_sessions():
     """Scannt logs/ beim Start und füllt completed_streams mit vorhandenen Ordnern."""
@@ -475,30 +503,37 @@ def udp_listener():
 
     while True:
         try:
-            data, (ip, _) = sock.recvfrom(65535)
+            data, (ext_ip, _) = sock.recvfrom(65535)
             now = time.time()
+            # Interne Miniserver-IP aus Paket-Header extrahieren (hinter NAT)
+            internal_ip = extract_miniserver_ip(data) or ext_ip
             with _lock:
-                if ip not in active_streams:
-                    safe_ip     = ip.replace(":", "_")
+                if ext_ip not in active_streams:
+                    safe_ip     = internal_ip.replace(":", "_")
                     ts          = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                     folder_name = f"{safe_ip}_{ts}"
                     ip_dir      = LOG_BASE_DIR / folder_name
                     ip_dir.mkdir(parents=True, exist_ok=True)
                     logfile = ip_dir / f"{ts}.log"
-                    active_streams[ip] = {
-                        "ip":            ip,
+                    active_streams[ext_ip] = {
+                        "ip":            internal_ip,   # interne IP für Anzeige/Logs
+                        "ext_ip":        ext_ip,        # externe IP (UDP-Quelle, nur intern)
                         "folder":        folder_name,
                         "logfile":       str(logfile),
                         "last_seen":     now,
                         "bytes_written": 0,
                         "start_time":    datetime.now().isoformat(),
                     }
-                    print(f"[UDP] Neuer Stream von {ip}  >>  {logfile}")
-                    add_audit("Stream gestartet", f"IP: {ip}  Ordner: {folder_name}", user="System")
-                s = active_streams[ip]
+                    print(f"[UDP] Neuer Stream von {internal_ip} (ext: {ext_ip})  >>  {logfile}")
+                    add_audit("Stream gestartet", f"IP: {internal_ip}  Ordner: {folder_name}", user="System")
+                s = active_streams[ext_ip]
+                # Interne IP nachträglich aktualisieren falls erstes Paket kein RFC1918 lieferte
+                if internal_ip != ext_ip and s["ip"] == ext_ip:
+                    s["ip"] = internal_ip
                 s["last_seen"]      = now
                 s["bytes_written"] += len(data)
                 ts   = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                display_ip = s["ip"]
                 # Log-Datei rotieren falls Größenlimit erreicht
                 max_mb = load_settings().get("max_log_size_mb", 10)
                 if max_mb > 0:
@@ -517,7 +552,7 @@ def udp_listener():
                 if msgs:
                     with open(s["logfile"], "a", encoding="utf-8") as f:
                         for msg in msgs:
-                            f.write(f"{ts}  {ip}  {msg}\n")
+                            f.write(f"{ts}  {display_ip}  {msg}\n")
         except socket.timeout:
             pass
         except Exception as e:
@@ -594,10 +629,11 @@ def stream_monitor():
                 s = active_streams.pop(ip)
                 s["end_time"] = datetime.now().isoformat()
                 completed_streams.insert(0, s)
+                display_ip = s["ip"]  # interne IP für Anzeige
                 add_audit("Stream beendet",
-                          f"IP: {ip}  Volumen: {fmt_bytes(s['bytes_written'])}",
+                          f"IP: {display_ip}  Volumen: {fmt_bytes(s['bytes_written'])}",
                           user="System")
-                print(f"[UDP] Stream von {ip} beendet")
+                print(f"[UDP] Stream von {display_ip} beendet")
         if now - _last_cleanup >= 300:
             _last_cleanup = now
             _auto_cleanup()
@@ -1381,14 +1417,15 @@ def delete_folder():
 @login_req
 def live_stream(ip: str):
     with _lock:
-        is_active = ip in active_streams
+        active_s = _stream_by_display_ip(ip)
+        is_active = active_s is not None
         if is_active:
-            logfile = active_streams[ip]["logfile"]
-            folder  = active_streams[ip].get("folder", ip.replace(":", "_"))
+            logfile = active_s["logfile"]
+            folder  = active_s.get("folder", ip.replace(".", "_"))
         else:
             match   = next((s for s in completed_streams if s["ip"] == ip), None)
             logfile = match["logfile"] if match else None
-            folder  = match.get("folder", ip.replace(":", "_")) if match else ip.replace(":", "_")
+            folder  = match.get("folder", ip.replace(".", "_")) if match else ip.replace(".", "_")
 
     if not logfile:
         flash(t("live_no_log"), "error")
@@ -1468,8 +1505,9 @@ def live_stream(ip: str):
 def api_tail(ip: str):
     after = int(request.args.get("after", 0))
     with _lock:
-        is_active = ip in active_streams
-        logfile   = active_streams[ip]["logfile"] if is_active else None
+        active_s  = _stream_by_display_ip(ip)
+        is_active = active_s is not None
+        logfile   = active_s["logfile"] if is_active else None
         if not is_active:
             match = next((s for s in completed_streams if s["ip"] == ip), None)
             logfile = match["logfile"] if match else None
