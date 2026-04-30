@@ -359,23 +359,50 @@ def stream_stats():
 
 # ── Loxone Paket-Parser ────────────────────────────────────────────────────
 def extract_messages(data: bytes) -> list:
-    """Gibt eine Liste aller lesbaren Textnachrichten aus einem UDP-Paket zurück.
-    - Erkennt UTF-8 (inkl. Umlaute, ü ö ä etc.)
-    - Filtert Binär-Fragmente (< 4 Bytes, kein gültiges UTF-8, < 80% druckbare Zeichen)
-    - Gibt leere Liste zurück bei reinen Binär-Paketen (Keepalive etc.)
+    """Extrahiert Textnachrichten aus einem Loxone UDP-Debug-Paket.
+
+    Loxone-Protokoll (verifiziert gegen https://github.com/Smarteon/lox-debug):
+      [Binär-Header]  [Nachrichtentext]  \x00\x1f\x1f
+    Der Text steht am Ende des Pakets vor dem 3-Byte-Terminator.
+    Extraktion: Rückwärts-Scan vom Terminator, UTF-8 erweitert (Umlaute etc.).
+    Fallback: \x00\x01...\x00 Muster für ältere Firmware-Versionen.
     """
+    # ── Primär: \x00\x1f\x1f Terminator (Loxone-Protokoll) ──────────────────
+    term = data.find(b'\x00\x1f\x1f')
+    if term > 0:
+        payload = data[:term]
+        # Rückwärts-Scan: letzten druckbaren Block finden
+        # Bytes 0x20–0x7e (ASCII) + ≥0x80 (UTF-8 Multi-Byte-Sequenzen)
+        i = len(payload) - 1
+        while i >= 0 and not (0x20 <= payload[i] <= 0x7e or payload[i] >= 0x80):
+            i -= 1
+        if i >= 0:
+            end = i + 1
+            while i >= 0 and (0x20 <= payload[i] <= 0x7e or payload[i] >= 0x80):
+                i -= 1
+            text_bytes = payload[i + 1:end]
+            if len(text_bytes) >= 4:
+                try:
+                    text = text_bytes.decode('utf-8').strip()
+                except UnicodeDecodeError:
+                    text = text_bytes.decode('latin-1').strip()
+                if text and len(text) >= 4:
+                    printable = sum(1 for c in text if c.isprintable())
+                    if printable / len(text) >= 0.8:
+                        return [text]
+
+    # ── Fallback: \x00\x01...\x00 Muster (ältere Firmware / LxMon-Format) ───
     matches = re.findall(rb'\x00\x01(.+?)\x00', data, re.DOTALL)
     results = []
     for m in matches:
-        if len(m) < 4:          # zu kurz → Binär-Fragment
+        if len(m) < 4:
             continue
         try:
             text = m.decode('utf-8').strip()
         except UnicodeDecodeError:
-            continue            # kein gültiges UTF-8 → Binär-Rauschen, verwerfen
+            continue
         if not text:
             continue
-        # Mindestens 80 % druckbare Zeichen → echter Text
         printable = sum(1 for c in text if c.isprintable())
         if printable / len(text) >= 0.8:
             results.append(text)
