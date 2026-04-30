@@ -386,10 +386,8 @@ def extract_messages(data: bytes) -> list:
                     text = text_bytes.decode('utf-8').strip()
                 except UnicodeDecodeError:
                     text = text_bytes.decode('latin-1').strip()
-                if text and len(text) >= 4:
-                    printable = sum(1 for c in text if c.isprintable())
-                    if printable / len(text) >= 0.8:
-                        return [text]
+                if _is_valid_msg(text):
+                    return [text]
 
     # ── Fallback: \x00\x01...\x00 Muster (ältere Firmware / LxMon-Format) ───
     matches = re.findall(rb'\x00\x01(.+?)\x00', data, re.DOTALL)
@@ -401,12 +399,24 @@ def extract_messages(data: bytes) -> list:
             text = m.decode('utf-8').strip()
         except UnicodeDecodeError:
             continue
-        if not text:
-            continue
-        printable = sum(1 for c in text if c.isprintable())
-        if printable / len(text) >= 0.8:
+        if _is_valid_msg(text):
             results.append(text)
     return results
+
+
+def _is_valid_msg(text: str) -> bool:
+    """Prüft ob ein dekodierter Text eine echte Loxone-Nachricht ist.
+    Echte Meldungen: ≥ 8 Zeichen ODER enthalten mindestens ein Leerzeichen,
+    ≥ 80 % druckbare Zeichen, mindestens 4 Zeichen nach strip().
+    Filtert Binär-Fragmente wie '1\"\"\"', '@x', einzelne Symbole.
+    """
+    if not text or len(text) < 4:
+        return False
+    printable = sum(1 for c in text if c.isprintable())
+    if printable / len(text) < 0.8:
+        return False
+    # Mindestens 8 Zeichen ODER mindestens ein Leerzeichen (echte Meldungen sind mehrteilig)
+    return len(text) >= 8 or ' ' in text
 
 # ── Startup: vorhandene Log-Ordner als beendete Sessions laden ────────────
 def _load_existing_sessions():
@@ -507,7 +517,7 @@ def udp_listener():
                 if msgs:
                     with open(s["logfile"], "a", encoding="utf-8") as f:
                         for msg in msgs:
-                            f.write(f"{ts}  {msg}\n")
+                            f.write(f"{ts}  {ip}  {msg}\n")
         except socket.timeout:
             pass
         except Exception as e:
