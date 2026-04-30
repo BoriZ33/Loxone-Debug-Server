@@ -354,23 +354,28 @@ def stream_stats():
         return list(active_streams.values()), list(completed_streams)
 
 # ── Loxone Paket-Parser ────────────────────────────────────────────────────
-def extract_message(data: bytes) -> str:
-    # Loxone sendet Text als UTF-8 zwischen \x00\x01 ... \x00
-    # re.DOTALL damit auch Multi-Byte UTF-8 Zeichen (z.B. ü = \xc3\xbc) erfasst werden
+def extract_messages(data: bytes) -> list:
+    """Gibt eine Liste aller lesbaren Textnachrichten aus einem UDP-Paket zurück.
+    - Erkennt UTF-8 (inkl. Umlaute, ü ö ä etc.)
+    - Filtert Binär-Fragmente (< 4 Bytes, kein gültiges UTF-8, < 80% druckbare Zeichen)
+    - Gibt leere Liste zurück bei reinen Binär-Paketen (Keepalive etc.)
+    """
     matches = re.findall(rb'\x00\x01(.+?)\x00', data, re.DOTALL)
-    if matches:
-        lines = []
-        for m in matches:
-            try:
-                text = m.decode('utf-8').strip()
-            except UnicodeDecodeError:
-                text = m.decode('ascii', errors='replace').strip()
-            if text:
-                lines.append(text)
-        if lines:
-            return '\n'.join(lines)
-    # Reines Binär-Paket (z.B. Keepalive) → nicht loggen
-    return None
+    results = []
+    for m in matches:
+        if len(m) < 4:          # zu kurz → Binär-Fragment
+            continue
+        try:
+            text = m.decode('utf-8').strip()
+        except UnicodeDecodeError:
+            continue            # kein gültiges UTF-8 → Binär-Rauschen, verwerfen
+        if not text:
+            continue
+        # Mindestens 80 % druckbare Zeichen → echter Text
+        printable = sum(1 for c in text if c.isprintable())
+        if printable / len(text) >= 0.8:
+            results.append(text)
+    return results
 
 # ── UDP Listener ───────────────────────────────────────────────────────────
 def udp_listener():
@@ -406,11 +411,12 @@ def udp_listener():
                 s = active_streams[ip]
                 s["last_seen"]      = now
                 s["bytes_written"] += len(data)
-                ts  = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                msg = extract_message(data)
-                if msg:
+                ts   = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                msgs = extract_messages(data)
+                if msgs:
                     with open(s["logfile"], "a", encoding="utf-8") as f:
-                        f.write(f"{ts}  {msg}\n")
+                        for msg in msgs:
+                            f.write(f"{ts}  {msg}\n")
         except socket.timeout:
             pass
         except Exception as e:
