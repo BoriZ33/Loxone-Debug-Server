@@ -533,7 +533,9 @@ def udp_listener():
                 s["last_seen"]      = now
                 s["bytes_written"] += len(data)
                 ts   = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                display_ip = s["ip"]
+                # Pro Paket die interne IP verwenden — jede Meldung kann von
+                # einer anderen Miniserver-IP stammen (Gateway/Client-System)
+                display_ip = internal_ip
                 # Log-Datei rotieren falls Größenlimit erreicht
                 max_mb = load_settings().get("max_log_size_mb", 10)
                 if max_mb > 0:
