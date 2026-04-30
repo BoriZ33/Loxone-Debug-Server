@@ -381,6 +381,52 @@ def extract_messages(data: bytes) -> list:
             results.append(text)
     return results
 
+# ── Startup: vorhandene Log-Ordner als beendete Sessions laden ────────────
+def _load_existing_sessions():
+    """Scannt logs/ beim Start und füllt completed_streams mit vorhandenen Ordnern."""
+    if not LOG_BASE_DIR.exists():
+        return
+    loaded = 0
+    for folder in sorted(LOG_BASE_DIR.iterdir(), key=lambda d: d.stat().st_mtime):
+        if not folder.is_dir():
+            continue
+        name = folder.name
+        m = _FOLDER_RE.match(name)
+        if not m:
+            continue
+        ip_part  = m.group(1).replace("_", ".")
+        dt_part  = m.group(2)                          # YYYY-MM-DD_HH-MM-SS
+        try:
+            start_dt = datetime.strptime(dt_part, "%Y-%m-%d_%H-%M-%S")
+        except ValueError:
+            continue
+        # Gesamtgröße und letzte Änderung ermitteln
+        log_files = sorted(folder.glob("*.log"), key=lambda f: f.stat().st_mtime)
+        if not log_files:
+            continue
+        total_bytes = sum(f.stat().st_size for f in log_files)
+        end_mtime   = log_files[-1].stat().st_mtime
+        end_dt      = datetime.fromtimestamp(end_mtime)
+        with _lock:
+            # Nicht doppelt laden falls bereits aktiv
+            if ip_part in active_streams:
+                continue
+            completed_streams.append({
+                "ip":            ip_part,
+                "folder":        name,
+                "logfile":       str(log_files[-1]),
+                "last_seen":     end_mtime,
+                "bytes_written": total_bytes,
+                "start_time":    start_dt.isoformat(),
+                "end_time":      end_dt.isoformat(),
+            })
+        loaded += 1
+    # Neueste zuerst
+    with _lock:
+        completed_streams.sort(key=lambda s: s.get("end_time", ""), reverse=True)
+    if loaded:
+        print(f"[START] {loaded} bestehende Session(s) aus logs/ geladen")
+
 # ── UDP Listener ───────────────────────────────────────────────────────────
 def udp_listener():
     LOG_BASE_DIR.mkdir(exist_ok=True)
@@ -1823,6 +1869,7 @@ def verlauf():
 if __name__ == "__main__":
     LOG_BASE_DIR.mkdir(exist_ok=True)
     load_users()
+    _load_existing_sessions()
 
     for target in (udp_listener, stream_monitor):
         threading.Thread(target=target, daemon=True).start()
