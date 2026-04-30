@@ -355,16 +355,22 @@ def stream_stats():
 
 # ── Loxone Paket-Parser ────────────────────────────────────────────────────
 def extract_message(data: bytes) -> str:
-    matches = re.findall(rb'\x00\x01([\x20-\x7e]{4,})\x00', data)
+    # Loxone sendet Text als UTF-8 zwischen \x00\x01 ... \x00
+    # re.DOTALL damit auch Multi-Byte UTF-8 Zeichen (z.B. ü = \xc3\xbc) erfasst werden
+    matches = re.findall(rb'\x00\x01(.+?)\x00', data, re.DOTALL)
     if matches:
-        return "  ".join(m.decode("ascii", errors="replace") for m in matches)
-    parts = re.findall(rb'[\x20-\x7e]{8,}', data)
-    if parts:
-        meaningful = [p.decode("ascii", errors="replace").strip()
-                      for p in parts if len(p) >= 8]
-        if meaningful:
-            return "  ".join(meaningful)
-    return f"[binary {len(data)} bytes]"
+        lines = []
+        for m in matches:
+            try:
+                text = m.decode('utf-8').strip()
+            except UnicodeDecodeError:
+                text = m.decode('ascii', errors='replace').strip()
+            if text:
+                lines.append(text)
+        if lines:
+            return '\n'.join(lines)
+    # Reines Binär-Paket (z.B. Keepalive) → nicht loggen
+    return None
 
 # ── UDP Listener ───────────────────────────────────────────────────────────
 def udp_listener():
@@ -402,8 +408,9 @@ def udp_listener():
                 s["bytes_written"] += len(data)
                 ts  = datetime.now().strftime("%H:%M:%S.%f")[:-3]
                 msg = extract_message(data)
-                with open(s["logfile"], "a", encoding="utf-8") as f:
-                    f.write(f"{ts}  {msg}\n")
+                if msg:
+                    with open(s["logfile"], "a", encoding="utf-8") as f:
+                        f.write(f"{ts}  {msg}\n")
         except socket.timeout:
             pass
         except Exception as e:
