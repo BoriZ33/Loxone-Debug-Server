@@ -1085,6 +1085,7 @@ function sortTable(th) {
                   <form class="inline" method="post" action="{url_for('delete_folder')}"
                         onsubmit="return confirm({json.dumps(t('confirm_delete_folder', name=folder))})">
                     <input type="hidden" name="folder" value="{folder}">
+                    <input type="hidden" name="next" value="dashboard">
                     <button class="btn btn-sm btn-danger">{t('btn_delete')}</button>
                   </form>
                 </div>
@@ -1147,6 +1148,7 @@ function sortTable(th) {
                   <form class="inline" method="post" action="{url_for('delete_folder')}"
                         onsubmit="return confirm({json.dumps(t('confirm_delete_folder', name=folder))})">
                     <input type="hidden" name="folder" value="{folder}">
+                    <input type="hidden" name="next" value="dashboard">
                     <button class="btn btn-sm btn-danger">{t('btn_delete')}</button>
                   </form>
                 </div>
@@ -1398,19 +1400,24 @@ def delete_file():
 @app.route("/delete_folder", methods=["POST"])
 @login_req
 def delete_folder():
-    folder = request.form.get("folder", "").strip()
+    folder    = request.form.get("folder", "").strip()
+    next_page = request.form.get("next", "files")   # "dashboard" oder "files"
     try:
         path = safe_path(LOG_BASE_DIR, folder)
     except Exception:
         flash(t("files_invalid_path"), "error")
-        return redirect(url_for("files"))
+        return redirect(url_for("dashboard" if next_page == "dashboard" else "files"))
     if path.is_dir():
         shutil.rmtree(path)
         add_audit(t("audit_del_folder"), folder)
         flash(t("folder_deleted"), "success")
+        # Aus dem In-Memory-Cache entfernen
+        with _lock:
+            global completed_streams
+            completed_streams = [s for s in completed_streams if s.get("folder") != folder]
     else:
         flash(t("folder_not_found"), "error")
-    return redirect(url_for("files"))
+    return redirect(url_for("dashboard" if next_page == "dashboard" else "files"))
 
 # ══════════════════════════════════════════════════════════════════════════
 # Live Stream
