@@ -21,7 +21,7 @@ USERS_FILE     = Path("users.json")
 AUDIT_FILE     = Path("audit.json")
 SETTINGS_FILE  = Path("settings.json")
 STREAM_TIMEOUT = 30
-VERSION        = "V1.04"
+VERSION        = "V1.05"
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -56,7 +56,7 @@ def add_audit(action: str, detail: str = "", user: str = None):
         AUDIT_FILE.write_text(json.dumps(log, indent=2), encoding="utf-8")
 
 # ── Einstellungen ─────────────────────────────────────────────────────────
-_SETTINGS_DEFAULTS = {"http_port": 8080, "udp_port": 7777, "stream_timeout": 30, "auto_delete_days": 0, "max_storage_gb": 0, "max_log_size_mb": 10}
+_SETTINGS_DEFAULTS = {"http_port": 8080, "udp_port": 7777, "stream_timeout": 30, "auto_delete_days": 0, "max_storage_gb": 0, "max_log_size_mb": 10, "auto_update": False, "auto_update_interval": 60}
 
 def load_settings() -> dict:
     if not SETTINGS_FILE.exists():
@@ -174,6 +174,16 @@ TRANSLATIONS = {
         "audit_pw_changed": "Passwort geändert", "audit_role": "Rolle",
         "audit_no_change": "keine Änderung",
         "footer": f"Loxone Debug Server {VERSION} &mdash; von Silas Hoffmann",
+        "settings_auto_update": "Auto-Update", "settings_auto_update_hint": "(Prüft regelmäßig auf neue Versionen auf GitHub und startet bei Update automatisch neu)",
+        "settings_auto_update_interval": "Prüfintervall", "settings_auto_update_interval_hint": "(Minuten zwischen den Prüfungen, Standard: 60)",
+        "update_title": "Software-Update", "update_status_ok": "Aktuell", "update_status_available": "Update verfügbar",
+        "update_local": "Lokale Version", "update_remote": "Remote Version",
+        "update_last_check": "Letzte Prüfung", "update_never": "Noch nicht geprüft",
+        "update_btn_check": "Jetzt prüfen", "update_btn_update": "Update & Neustart",
+        "update_checking": "Prüfe...", "update_no_git": "Git nicht verfügbar",
+        "update_pull_ok": "Update erfolgreich — Server wird neu gestartet…",
+        "update_pull_fail": "Update fehlgeschlagen",
+        "audit_auto_update": "Auto-Update", "audit_manual_update": "Manuelles Update",
     },
     "en": {
         "nav_dashboard": "Dashboard", "nav_users": "Users",
@@ -277,6 +287,16 @@ TRANSLATIONS = {
         "audit_pw_changed": "Password changed", "audit_role": "Role",
         "audit_no_change": "no change",
         "footer": f"Loxone Debug Server {VERSION} &mdash; by Silas Hoffmann",
+        "settings_auto_update": "Auto-Update", "settings_auto_update_hint": "(Checks for new versions on GitHub and automatically restarts when an update is found)",
+        "settings_auto_update_interval": "Check Interval", "settings_auto_update_interval_hint": "(minutes between checks, default: 60)",
+        "update_title": "Software Update", "update_status_ok": "Up to date", "update_status_available": "Update available",
+        "update_local": "Local version", "update_remote": "Remote version",
+        "update_last_check": "Last check", "update_never": "Not checked yet",
+        "update_btn_check": "Check now", "update_btn_update": "Update & Restart",
+        "update_checking": "Checking...", "update_no_git": "Git not available",
+        "update_pull_ok": "Update successful — restarting server…",
+        "update_pull_fail": "Update failed",
+        "audit_auto_update": "Auto-update", "audit_manual_update": "Manual update",
     },
 }
 
@@ -491,6 +511,88 @@ def _load_existing_sessions():
         completed_streams.sort(key=lambda s: s.get("end_time", ""), reverse=True)
     if loaded:
         print(f"[START] {loaded} bestehende Session(s) aus logs/ geladen")
+
+# ── Auto-Update ────────────────────────────────────────────────────────────
+_update_status: dict = {"last_check": None, "up_to_date": True, "current": "", "remote": "", "error": ""}
+_update_lock = threading.Lock()
+_GIT_DIR = Path(__file__).parent
+
+def _git(*args, timeout=20) -> tuple[int, str, str]:
+    """Führt einen git-Befehl aus. Gibt (returncode, stdout, stderr) zurück."""
+    try:
+        r = subprocess.run(
+            ["git"] + list(args),
+            capture_output=True, text=True, timeout=timeout,
+            cwd=str(_GIT_DIR)
+        )
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
+    except FileNotFoundError:
+        return -1, "", "git not found"
+    except subprocess.TimeoutExpired:
+        return -1, "", "timeout"
+    except Exception as e:
+        return -1, "", str(e)
+
+def check_for_update() -> bool:
+    """Prüft ob auf origin/main eine neue Version verfügbar ist.
+    Gibt True zurück wenn ein Update verfügbar ist."""
+    rc, _, err = _git("fetch", "origin", timeout=20)
+    if rc != 0:
+        with _update_lock:
+            _update_status["error"] = err or "fetch failed"
+            _update_status["last_check"] = datetime.now().isoformat()
+        return False
+
+    _, local,  _ = _git("rev-parse", "HEAD")
+    _, remote, _ = _git("rev-parse", "origin/main")
+
+    up_to_date = (local == remote) or not local or not remote
+    with _update_lock:
+        _update_status["last_check"]  = datetime.now().isoformat()
+        _update_status["current"]     = local[:7]  if local  else "?"
+        _update_status["remote"]      = remote[:7] if remote else "?"
+        _update_status["up_to_date"]  = up_to_date
+        _update_status["error"]       = ""
+    return not up_to_date
+
+def apply_update(triggered_by: str = "System"):
+    """Führt git pull durch und startet den Server neu."""
+    rc, out, err = _git("pull", timeout=60)
+    if rc == 0:
+        add_audit(t("audit_auto_update") if triggered_by == "System" else t("audit_manual_update"),
+                  out[:200], user=triggered_by)
+        print(f"[UPDATE] git pull erfolgreich: {out}")
+
+        def do_restart():
+            time.sleep(2)
+            try:
+                subprocess.Popen([sys.executable] + sys.argv, close_fds=True, creationflags=0)
+            except TypeError:
+                subprocess.Popen([sys.executable] + sys.argv, close_fds=True)
+            os._exit(0)
+
+        threading.Thread(target=do_restart, daemon=False).start()
+        return True, out
+    else:
+        add_audit(t("update_pull_fail"), err[:200], user=triggered_by)
+        print(f"[UPDATE] git pull fehlgeschlagen: {err}")
+        return False, err
+
+def update_checker():
+    """Hintergrund-Thread: prüft periodisch auf neue Versionen."""
+    # Kurz warten damit der Server vollständig gestartet ist
+    time.sleep(30)
+    while True:
+        cfg = load_settings()
+        if cfg.get("auto_update", False):
+            try:
+                if check_for_update():
+                    print("[UPDATE] Neue Version erkannt — starte Update…")
+                    apply_update(triggered_by="System")
+            except Exception as e:
+                print(f"[UPDATE] Fehler: {e}")
+        interval = max(5, cfg.get("auto_update_interval", 60)) * 60
+        time.sleep(interval)
 
 # ── UDP Listener ───────────────────────────────────────────────────────────
 def udp_listener():
@@ -1746,12 +1848,14 @@ def einstellungen():
     if request.method == "POST":
         old_cfg = dict(cfg)
         try:
-            http_port   = int(request.form.get("http_port",        cfg["http_port"]))
-            udp_port    = int(request.form.get("udp_port",         cfg["udp_port"]))
-            timeout     = int(request.form.get("stream_timeout",   cfg["stream_timeout"]))
-            auto_delete = int(request.form.get("auto_delete_days", cfg["auto_delete_days"]))
-            max_storage  = float(request.form.get("max_storage_gb",  cfg.get("max_storage_gb", 0)))
-            max_log_size = int(request.form.get("max_log_size_mb",   cfg.get("max_log_size_mb", 10)))
+            http_port    = int(request.form.get("http_port",             cfg["http_port"]))
+            udp_port     = int(request.form.get("udp_port",              cfg["udp_port"]))
+            timeout      = int(request.form.get("stream_timeout",        cfg["stream_timeout"]))
+            auto_delete  = int(request.form.get("auto_delete_days",      cfg["auto_delete_days"]))
+            max_storage  = float(request.form.get("max_storage_gb",      cfg.get("max_storage_gb", 0)))
+            max_log_size = int(request.form.get("max_log_size_mb",       cfg.get("max_log_size_mb", 10)))
+            auto_update  = request.form.get("auto_update") == "1"
+            au_interval  = max(5, int(request.form.get("auto_update_interval", cfg.get("auto_update_interval", 60))))
             if not (1 <= http_port <= 65535 and 1 <= udp_port <= 65535):
                 raise ValueError
             if not (1 <= timeout <= 3600) or auto_delete < 0 or max_storage < 0 or max_log_size < 1:
@@ -1762,16 +1866,19 @@ def einstellungen():
 
         cfg = {"http_port": http_port, "udp_port": udp_port,
                "stream_timeout": timeout, "auto_delete_days": auto_delete,
-               "max_storage_gb": max_storage, "max_log_size_mb": max_log_size}
+               "max_storage_gb": max_storage, "max_log_size_mb": max_log_size,
+               "auto_update": auto_update, "auto_update_interval": au_interval}
         save_settings(cfg)
 
         changes = []
-        if old_cfg["http_port"]                    != http_port:    changes.append(f"HTTP Port {old_cfg['http_port']} → {http_port}");                   port_changed = True
-        if old_cfg["udp_port"]                     != udp_port:     changes.append(f"UDP Port {old_cfg['udp_port']} → {udp_port}");                      port_changed = True
-        if old_cfg["stream_timeout"]               != timeout:      changes.append(f"Timeout {old_cfg['stream_timeout']} → {timeout} s")
-        if old_cfg["auto_delete_days"]             != auto_delete:  changes.append(f"Auto-Delete {old_cfg['auto_delete_days']} → {auto_delete} d")
-        if old_cfg.get("max_storage_gb", 0)        != max_storage:  changes.append(f"Max. Speicher {old_cfg.get('max_storage_gb', 0)} → {max_storage} GB")
-        if old_cfg.get("max_log_size_mb", 10)      != max_log_size: changes.append(f"Max. Log-Größe {old_cfg.get('max_log_size_mb', 10)} → {max_log_size} MB")
+        if old_cfg["http_port"]                         != http_port:    changes.append(f"HTTP Port {old_cfg['http_port']} → {http_port}");                   port_changed = True
+        if old_cfg["udp_port"]                          != udp_port:     changes.append(f"UDP Port {old_cfg['udp_port']} → {udp_port}");                      port_changed = True
+        if old_cfg["stream_timeout"]                    != timeout:      changes.append(f"Timeout {old_cfg['stream_timeout']} → {timeout} s")
+        if old_cfg["auto_delete_days"]                  != auto_delete:  changes.append(f"Auto-Delete {old_cfg['auto_delete_days']} → {auto_delete} d")
+        if old_cfg.get("max_storage_gb", 0)             != max_storage:  changes.append(f"Max. Storage {old_cfg.get('max_storage_gb', 0)} → {max_storage} GB")
+        if old_cfg.get("max_log_size_mb", 10)           != max_log_size: changes.append(f"Max. Log Size {old_cfg.get('max_log_size_mb', 10)} → {max_log_size} MB")
+        if old_cfg.get("auto_update", False)            != auto_update:  changes.append(f"Auto-Update → {'on' if auto_update else 'off'}")
+        if old_cfg.get("auto_update_interval", 60)      != au_interval:  changes.append(f"Update interval → {au_interval} min")
 
         if changes:
             add_audit(t("audit_settings"), "; ".join(changes))
@@ -1783,6 +1890,24 @@ def einstellungen():
     auto_del_val  = cfg.get("auto_delete_days", 0)
     max_store_val = cfg.get("max_storage_gb", 0)
     max_log_val   = cfg.get("max_log_size_mb", 10)
+    auto_update_on = cfg.get("auto_update", False)
+    au_interval_val = cfg.get("auto_update_interval", 60)
+
+    # Update-Status für die Anzeige aufbereiten
+    with _update_lock:
+        us = dict(_update_status)
+    if us["error"]:
+        upd_badge = f'<span class="badge" style="background:#e65100;color:#fff">{us["error"][:40]}</span>'
+    elif not us["last_check"]:
+        upd_badge = f'<span class="badge badge-gray">{t("update_never")}</span>'
+    elif us["up_to_date"]:
+        upd_badge = f'<span class="badge badge-green">&#10003; {t("update_status_ok")}</span>'
+    else:
+        upd_badge = f'<span class="badge" style="background:#e65100;color:#fff">&#9650; {t("update_status_available")}</span>'
+
+    last_check_str = us["last_check"][:19].replace("T", " ") if us["last_check"] else t("update_never")
+    show_update_btn = not us["up_to_date"] and not us["error"] and us["last_check"]
+
     body = f"""
     <div class="page-header">
       <h1>{t('settings_title')}</h1>
@@ -1812,9 +1937,19 @@ def einstellungen():
             <label>{t('settings_max_storage')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_max_storage_hint')}</span></label>
             <input type="number" name="max_storage_gb" value="{max_store_val}" min="0" max="10000" step="0.1" required>
           </div>
-          <div class="form-group" style="margin-bottom:28px">
+          <div class="form-group" style="margin-bottom:18px">
             <label>{t('settings_log_size')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_log_size_hint')}</span></label>
             <input type="number" name="max_log_size_mb" value="{max_log_val}" min="1" max="10000" required>
+          </div>
+          <div class="form-group" style="margin-bottom:18px">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+              <input type="checkbox" name="auto_update" value="1" {'checked' if auto_update_on else ''} style="width:18px;height:18px;accent-color:var(--green)">
+              {t('settings_auto_update')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_auto_update_hint')}</span>
+            </label>
+          </div>
+          <div class="form-group" style="margin-bottom:28px">
+            <label>{t('settings_auto_update_interval')} <span style="font-weight:400;text-transform:none;color:#aaa">{t('settings_auto_update_interval_hint')}</span></label>
+            <input type="number" name="auto_update_interval" value="{au_interval_val}" min="5" max="1440" required>
           </div>
           <div class="actions">
             <button class="btn btn-primary">{t('btn_save')}</button>
@@ -1843,6 +1978,28 @@ def einstellungen():
       </div>
     </div>
     <div class="card" style="margin-top:16px">
+      <div class="card-header"><h2>{t('update_title')}</h2><span id="upd-badge">{upd_badge}</span></div>
+      <div class="card-body">
+        <div style="display:flex;gap:24px;font-size:13px;color:var(--muted);margin-bottom:16px;flex-wrap:wrap">
+          <span>{t('update_local')}: <strong style="color:var(--text);font-family:monospace">{us['current'] or '—'}</strong></span>
+          <span>{t('update_remote')}: <strong style="color:var(--text);font-family:monospace" id="upd-remote">{us['remote'] or '—'}</strong></span>
+          <span>{t('update_last_check')}: <strong style="color:var(--text)" id="upd-last">{last_check_str}</strong></span>
+        </div>
+        <div class="actions">
+          <button class="btn btn-secondary" id="btn-check" onclick="checkUpdate()">
+            {t('update_btn_check')}
+          </button>
+          {'<form method="post" action="' + url_for('do_update_route') + '" id="frm-update" style="display:inline">'
+           + '<button class="btn btn-primary" onclick="return confirm(\'Update & Restart?\')">'
+           + t('update_btn_update') + '</button></form>'
+           if show_update_btn else
+           '<button class="btn btn-primary" id="btn-update" style="display:none" onclick="document.getElementById(\'frm-update\').submit()">'
+           + t('update_btn_update') + '</button>'
+           + '<form method="post" action="' + url_for('do_update_route') + '" id="frm-update" style="display:none"></form>'}
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
       <div class="card-header"><h2>{t('settings_restart_title')}</h2></div>
       <div class="card-body">
         <p style="font-size:13px;color:var(--muted);margin-bottom:16px">{t('settings_restart_desc')}</p>
@@ -1851,7 +2008,37 @@ def einstellungen():
           <button class="btn btn-danger">{t('btn_restart')}</button>
         </form>
       </div>
-    </div>"""
+    </div>
+    <script>
+    function checkUpdate() {{
+      var btn = document.getElementById('btn-check');
+      btn.disabled = true;
+      btn.textContent = '{t("update_checking")}';
+      fetch('{url_for("api_check_update")}', {{method:'POST'}})
+        .then(function(r){{ return r.json(); }})
+        .then(function(d){{
+          document.getElementById('upd-last').textContent = (d.last_check||'').replace('T',' ').slice(0,19);
+          document.getElementById('upd-remote').textContent = d.remote || '—';
+          var badge = document.getElementById('upd-badge');
+          if (d.error) {{
+            badge.innerHTML = '<span class="badge" style="background:#e65100;color:#fff">' + d.error + '</span>';
+          }} else if (d.up_to_date) {{
+            badge.innerHTML = '<span class="badge badge-green">&#10003; {t("update_status_ok")}</span>';
+            document.getElementById('btn-update') && (document.getElementById('btn-update').style.display='none');
+          }} else {{
+            badge.innerHTML = '<span class="badge" style="background:#e65100;color:#fff">&#9650; {t("update_status_available")}</span>';
+            var ub = document.getElementById('btn-update');
+            if (ub) {{ ub.style.display='inline-block'; }}
+          }}
+          btn.disabled = false;
+          btn.textContent = '{t("update_btn_check")}';
+        }})
+        .catch(function(){{
+          btn.disabled = false;
+          btn.textContent = '{t("update_btn_check")}';
+        }});
+    }}
+    </script>"""
     return page(body, t("settings_title"), "einstellungen")
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1892,6 +2079,55 @@ def restart_server():
     }}, 2500);
     </script>"""
     return page(body, t("restart_title"), "einstellungen")
+
+# ══════════════════════════════════════════════════════════════════════════
+# Update-Routen
+# ══════════════════════════════════════════════════════════════════════════
+@app.route("/api/check_update", methods=["POST"])
+@admin_req
+def api_check_update():
+    """Prüft manuell auf Updates (AJAX)."""
+    available = check_for_update()
+    with _update_lock:
+        status = dict(_update_status)
+    return jsonify({
+        "available": available,
+        "up_to_date": status["up_to_date"],
+        "current":    status["current"],
+        "remote":     status["remote"],
+        "last_check": status["last_check"],
+        "error":      status["error"],
+    })
+
+@app.route("/do_update", methods=["POST"])
+@admin_req
+def do_update_route():
+    """Manueller Update & Neustart."""
+    user = session.get("user", "?")
+    ok, msg = apply_update(triggered_by=user)
+    if ok:
+        body = f"""
+        <div class="page-header" style="text-align:center;padding-top:60px">
+          <h1>{t('update_pull_ok')}</h1>
+        </div>
+        <div class="card" style="max-width:400px;margin:24px auto">
+          <div class="card-body" style="text-align:center;padding:40px">
+            <div style="font-size:40px;margin-bottom:16px;animation:spin 1s linear infinite;display:inline-block">&#8635;</div>
+            <p style="color:var(--muted);font-size:13px">{t('restart_connecting')}</p>
+          </div>
+        </div>
+        <style>@keyframes spin{{from{{transform:rotate(0deg)}}to{{transform:rotate(360deg)}}}}</style>
+        <script>
+        setTimeout(function() {{
+          var iv = setInterval(function() {{
+            fetch('/').then(function(r) {{ if (r.ok) {{ clearInterval(iv); location.href = '/'; }} }}).catch(function(){{}});
+          }}, 1500);
+        }}, 2500);
+        </script>"""
+        return page(body, t("update_pull_ok"), "einstellungen")
+    else:
+        flash(f"{t('update_pull_fail')}: {msg}", "error")
+        return redirect(url_for("einstellungen"))
 
 # ══════════════════════════════════════════════════════════════════════════
 # Verlauf (Audit Log)
@@ -1960,7 +2196,7 @@ if __name__ == "__main__":
     load_users()
     _load_existing_sessions()
 
-    for target in (udp_listener, stream_monitor):
+    for target in (udp_listener, stream_monitor, update_checker):
         threading.Thread(target=target, daemon=True).start()
 
     cfg = load_settings()

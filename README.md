@@ -3,7 +3,7 @@
 A local server for receiving, storing, and displaying debug streams from the Loxone Miniserver.  
 Data is received via UDP and managed through a web interface in the browser.
 
-![Loxone Debug Server](https://img.shields.io/badge/Version-1.04-69A533?style=flat-square)
+![Loxone Debug Server](https://img.shields.io/badge/Version-1.05-69A533?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/Flask-3.0+-000000?style=flat-square&logo=flask)
 
@@ -213,6 +213,13 @@ In Loxone Config under **Miniserver → Settings → Logging & Monitoring**:
 ---
 
 ## Changelog
+
+### V1.05
+- New setting: Auto-Update — checks GitHub periodically for new versions and automatically runs `git pull` + restarts when an update is found
+- New setting: Check interval in minutes (default: 60)
+- Manual "Check now" button in Settings with live status display (current commit, remote commit, last check time)
+- "Update & Restart" button appears automatically when an update is available
+- All automatic and manual updates are recorded in the history
 
 ### V1.04
 - Internal Miniserver IP extracted from UDP packet header — works correctly behind NAT (external router IP no longer shown)
