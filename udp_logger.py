@@ -21,7 +21,7 @@ USERS_FILE     = Path("users.json")
 AUDIT_FILE     = Path("audit.json")
 SETTINGS_FILE  = Path("settings.json")
 STREAM_TIMEOUT = 30
-VERSION        = "V1.03"
+VERSION        = "V1.04"
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
