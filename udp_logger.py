@@ -530,8 +530,7 @@ def udp_listener():
                 # Interne IP nachträglich aktualisieren falls erstes Paket kein RFC1918 lieferte
                 if internal_ip != ext_ip and s["ip"] == ext_ip:
                     s["ip"] = internal_ip
-                s["last_seen"]      = now
-                s["bytes_written"] += len(data)
+                s["last_seen"] = now
                 ts   = datetime.now().strftime("%H:%M:%S.%f")[:-3]
                 # Pro Paket die interne IP verwenden — jede Meldung kann von
                 # einer anderen Miniserver-IP stammen (Gateway/Client-System)
@@ -542,11 +541,14 @@ def udp_listener():
                     try:
                         if Path(s["logfile"]).stat().st_size >= max_mb * 1024 * 1024:
                             ip_dir   = Path(s["logfile"]).parent
-                            base     = Path(s["logfile"]).stem
+                            # Neuen Dateinamen mit aktuellem Timestamp erstellen
+                            new_ts   = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                            new_log  = ip_dir / f"{new_ts}.log"
                             idx      = 2
-                            while (ip_dir / f"{base}_{idx}.log").exists():
+                            while new_log.exists():
+                                new_log = ip_dir / f"{new_ts}_{idx}.log"
                                 idx += 1
-                            s["logfile"] = str(ip_dir / f"{base}_{idx}.log")
+                            s["logfile"] = str(new_log)
                             print(f"[UDP] Log rotiert: {s['logfile']}")
                     except OSError:
                         pass
@@ -554,7 +556,10 @@ def udp_listener():
                 if msgs:
                     with open(s["logfile"], "a", encoding="utf-8") as f:
                         for msg in msgs:
-                            f.write(f"{ts}  {display_ip}  {msg}\n")
+                            line = f"{ts}  {display_ip}  {msg}\n"
+                            f.write(line)
+                            # Tatsächlich geschriebene Bytes zählen (konsistent mit Ordner-Ansicht)
+                            s["bytes_written"] += len(line.encode("utf-8"))
         except socket.timeout:
             pass
         except Exception as e:
