@@ -199,6 +199,7 @@ TRANSLATIONS = {
         "audit_update_check": "Update geprüft", "audit_git_pull": "Git Pull",
         "tbl_serials": "Seriennummern", "tbl_assigned_user": "Zuständig",
         "assign_none": "— niemand —",
+        "dash_stat_of": "von", "dash_stat_unlimited": "unbegrenzt",
     },
     "en": {
         "nav_dashboard": "Dashboard", "nav_users": "Users",
@@ -310,6 +311,7 @@ TRANSLATIONS = {
         "audit_update_check": "Update check", "audit_git_pull": "Git Pull",
         "tbl_serials": "Serial Numbers", "tbl_assigned_user": "Assigned To",
         "assign_none": "— nobody —",
+        "dash_stat_of": "of", "dash_stat_unlimited": "unlimited",
     },
 }
 
@@ -386,10 +388,15 @@ def fmt_duration(seconds: int) -> str:
     elif seconds < 3600:
         m, s = divmod(seconds, 60)
         return f"{m} min {s} s"
-    else:
+    elif seconds < 86400:
         h, rem = divmod(seconds, 3600)
         m, s = divmod(rem, 60)
         return f"{h}h {m}min {s}s"
+    else:
+        d, rem = divmod(seconds, 86400)
+        h, rem2 = divmod(rem, 3600)
+        m, s = divmod(rem2, 60)
+        return f"{d}d {h}h {m}min {s}s"
 
 _SN_RE = re.compile(r'\b(504[Ff]94[0-9A-Fa-f]{6,8})\b')
 
@@ -1111,8 +1118,14 @@ def dashboard():
     now = time.time()
     cfg = load_settings()
 
-    total_bytes = sum(s["bytes_written"] for s in active + completed)
-    ip_set = {s["ip"] for s in active + completed}
+    ip_set     = {s["ip"] for s in active + completed}
+    disk_bytes = _total_log_size()
+    max_gb     = cfg.get("max_storage_gb", 0)
+    if max_gb > 0:
+        limit_str = fmt_bytes(int(max_gb * 1024 ** 3))
+        vol_sub   = f'{t("dash_stat_of")} {limit_str}'
+    else:
+        vol_sub   = f'{t("dash_stat_of")} {t("dash_stat_unlimited")}'
 
     stats = f"""
 <div class="stats-grid">
@@ -1129,8 +1142,9 @@ def dashboard():
     <div class="lbl">{t('dash_stat_servers')}</div>
   </div>
   <div class="stat-card">
-    <div class="val">{fmt_bytes(int(total_bytes))}</div>
-    <div class="lbl">{t('dash_stat_volume')}</div>
+    <div class="val" style="font-size:20px">{fmt_bytes(disk_bytes)}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:2px">{vol_sub}</div>
+    <div class="lbl" style="margin-top:4px">{t('dash_stat_volume')}</div>
   </div>
 </div>"""
 
