@@ -17,11 +17,12 @@ from functools import wraps
 UDP_PORT       = 7777
 HTTP_PORT      = 8080
 LOG_BASE_DIR   = Path("logs")
-USERS_FILE     = Path("users.json")
-AUDIT_FILE     = Path("audit.json")
-SETTINGS_FILE  = Path("settings.json")
+USERS_FILE       = Path("users.json")
+AUDIT_FILE       = Path("audit.json")
+SETTINGS_FILE    = Path("settings.json")
+ASSIGNMENTS_FILE = Path("assignments.json")
 STREAM_TIMEOUT = 30
-VERSION        = "V1.05"
+VERSION        = "V1.06"
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -69,6 +70,22 @@ def load_settings() -> dict:
 
 def save_settings(s: dict):
     SETTINGS_FILE.write_text(json.dumps(s, indent=2), encoding="utf-8")
+
+def load_assignments() -> dict:
+    if not ASSIGNMENTS_FILE.exists():
+        return {}
+    try:
+        return json.loads(ASSIGNMENTS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def save_assignment(folder: str, user: str):
+    a = load_assignments()
+    if user:
+        a[folder] = user
+    else:
+        a.pop(folder, None)
+    ASSIGNMENTS_FILE.write_text(json.dumps(a, indent=2), encoding="utf-8")
 
 # ── Übersetzungen ──────────────────────────────────────────────────────────
 TRANSLATIONS = {
@@ -180,6 +197,8 @@ TRANSLATIONS = {
         "update_checking": "Prüfe…", "update_pulling": "Wird geladen…",
         "update_pull_ok": "Git Pull erfolgreich.", "update_pull_fail": "Git Pull fehlgeschlagen",
         "audit_update_check": "Update geprüft", "audit_git_pull": "Git Pull",
+        "tbl_serials": "Seriennummern", "tbl_assigned_user": "Zuständig",
+        "assign_none": "— niemand —",
     },
     "en": {
         "nav_dashboard": "Dashboard", "nav_users": "Users",
@@ -289,6 +308,8 @@ TRANSLATIONS = {
         "update_checking": "Checking…", "update_pulling": "Pulling…",
         "update_pull_ok": "Git pull successful.", "update_pull_fail": "Git pull failed",
         "audit_update_check": "Update check", "audit_git_pull": "Git Pull",
+        "tbl_serials": "Serial Numbers", "tbl_assigned_user": "Assigned To",
+        "assign_none": "— nobody —",
     },
 }
 
@@ -358,6 +379,40 @@ def fmt_bytes(n: int) -> str:
             return f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} TB"
+
+def fmt_duration(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds} s"
+    elif seconds < 3600:
+        m, s = divmod(seconds, 60)
+        return f"{m} min {s} s"
+    else:
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h}h {m}min {s}s"
+
+_SN_RE = re.compile(r'\b(504[Ff]94[0-9A-Fa-f]{6,8})\b')
+
+def find_serials(logfile: str, max_count: int = 3) -> list:
+    """Scan up to 2000 lines of a log file for Loxone serial numbers (504F94...), excluding air devices (504F94FFFE...)."""
+    seen, result = set(), []
+    try:
+        with open(logfile, "r", encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f):
+                if i >= 2000:
+                    break
+                for m in _SN_RE.finditer(line):
+                    sn = m.group(1).upper()
+                    if sn.startswith("504F94FFFE"):
+                        continue
+                    if sn not in seen:
+                        seen.add(sn)
+                        result.append(sn)
+                        if len(result) >= max_count:
+                            return result
+    except Exception:
+        pass
+    return result
 
 def safe_path(base: Path, rel: str) -> Path:
     p = (base / rel).resolve()
@@ -1096,22 +1151,59 @@ function sortTable(th) {
   });
   rows.forEach(function(r){ tbody.appendChild(r); });
 }
+document.addEventListener('change', function(e) {
+  if (!e.target.classList.contains('assign-sel')) return;
+  var sel = e.target;
+  var fd  = new FormData();
+  fd.append('folder', sel.dataset.folder);
+  fd.append('user',   sel.value);
+  sel.style.opacity = '0.5';
+  fetch('/api/assign', {method:'POST', body:fd})
+    .then(function(r){ return r.json(); })
+    .then(function(){ sel.style.opacity = '1'; })
+    .catch(function(){ sel.style.opacity = '1'; });
+});
 </script>"""
+
+    assignments = load_assignments()
+    all_users   = list(load_users().keys())
+
+    def _serial_badges(serials: list) -> str:
+        if not serials:
+            return '<span style="color:#bbb;font-size:11px">—</span>'
+        return " ".join(
+            f'<span style="font-family:monospace;font-size:11px;background:#f0f0f0;'
+            f'border:1px solid #ddd;border-radius:3px;padding:1px 5px">{sn}</span>'
+            for sn in serials
+        )
+
+    def _user_select(folder: str) -> str:
+        current = assignments.get(folder, "")
+        opts = f'<option value="">{t("assign_none")}</option>'
+        for u in sorted(all_users):
+            sel = 'selected' if u == current else ''
+            opts += f'<option value="{u}" {sel}>{u}</option>'
+        return (f'<select class="assign-sel" data-folder="{folder}" '
+                f'style="font-size:12px;padding:3px 6px;border:1px solid var(--border);'
+                f'border-radius:var(--radius);background:#fff;cursor:pointer">{opts}</select>')
 
     if active:
         rows = ""
         for s in sorted(active, key=lambda x: x["last_seen"], reverse=True):
-            age    = int(now - s["last_seen"])
-            dur    = int(now - datetime.fromisoformat(s["start_time"]).timestamp())
-            folder = s.get("folder", s["ip"].replace(":", "_"))
+            age     = int(now - s["last_seen"])
+            dur     = int(now - datetime.fromisoformat(s["start_time"]).timestamp())
+            folder  = s.get("folder", s["ip"].replace(":", "_"))
+            serials = find_serials(s["logfile"])
             rows += f"""
             <tr>
               <td><span class="badge badge-green"><span class="pulse pulse-green"></span>{t('badge_active')}</span></td>
               <td class="mono"><strong>{s['ip']}</strong></td>
               <td>{s['start_time'].replace('T',' ')[:19]}</td>
-              <td>{dur} s</td>
+              <td>{fmt_duration(dur)}</td>
               <td>{t('before_n_s', n=age)}</td>
               <td class="size">{fmt_bytes(s['bytes_written'])}</td>
+              <td>{_serial_badges(serials)}</td>
+              <td>{_user_select(folder)}</td>
               <td>
                 <div class="actions">
                   <a class="btn btn-sm btn-outline" href="{url_for('files', folder=folder)}">{t('btn_folder')}</a>
@@ -1139,7 +1231,10 @@ function sortTable(th) {
                 <th class="sortable" onclick="sortTable(this)">{t('tbl_ip')}</th>
                 <th class="sortable" onclick="sortTable(this)">{t('tbl_start')}</th>
                 <th>{t('tbl_runtime')}</th><th>{t('tbl_last_pkt')}</th>
-                <th>{t('tbl_volume')}</th><th>{t('tbl_actions')}</th>
+                <th>{t('tbl_volume')}</th>
+                <th>{t('tbl_serials')}</th>
+                <th>{t('tbl_assigned_user')}</th>
+                <th>{t('tbl_actions')}</th>
               </tr></thead>
               <tbody>{rows}</tbody>
             </table>
@@ -1164,10 +1259,11 @@ function sortTable(th) {
             try:
                 start = datetime.fromisoformat(s["start_time"])
                 end   = datetime.fromisoformat(s["end_time"])
-                dur   = str(int((end - start).total_seconds())) + " s"
+                dur   = fmt_duration(int((end - start).total_seconds()))
             except Exception:
                 pass
-            folder = s.get("folder", s["ip"].replace(":", "_"))
+            folder  = s.get("folder", s["ip"].replace(":", "_"))
+            serials = find_serials(s["logfile"])
             rows += f"""
             <tr>
               <td><span class="badge badge-gray"><span class="pulse pulse-gray"></span>{t('badge_ended')}</span></td>
@@ -1176,6 +1272,8 @@ function sortTable(th) {
               <td>{s.get('end_time','—').replace('T',' ')[:19]}</td>
               <td>{dur}</td>
               <td class="size">{fmt_bytes(s['bytes_written'])}</td>
+              <td>{_serial_badges(serials)}</td>
+              <td>{_user_select(folder)}</td>
               <td>
                 <div class="actions">
                   <a class="btn btn-sm btn-outline" href="{url_for('files', folder=folder)}">{t('btn_folder')}</a>
@@ -1202,7 +1300,10 @@ function sortTable(th) {
                 <th class="sortable" onclick="sortTable(this)">{t('tbl_ip')}</th>
                 <th class="sortable" onclick="sortTable(this)">{t('tbl_start')}</th>
                 <th class="sortable" onclick="sortTable(this)">{t('tbl_end')}</th>
-                <th>{t('tbl_duration')}</th><th>{t('tbl_volume')}</th><th>{t('tbl_actions')}</th>
+                <th>{t('tbl_duration')}</th><th>{t('tbl_volume')}</th>
+                <th>{t('tbl_serials')}</th>
+                <th>{t('tbl_assigned_user')}</th>
+                <th>{t('tbl_actions')}</th>
               </tr></thead>
               <tbody>{rows}</tbody>
             </table>
@@ -2009,6 +2110,19 @@ def api_git_pull():
     msg = out or err
     add_audit(t("audit_git_pull"), msg[:200], user=session.get("user", "?"))
     return jsonify({"ok": rc == 0, "msg": msg})
+
+# ══════════════════════════════════════════════════════════════════════════
+# Zuordnung (User-Assignment pro Session)
+# ══════════════════════════════════════════════════════════════════════════
+@app.route("/api/assign", methods=["POST"])
+@login_req
+def api_assign():
+    folder = request.form.get("folder", "").strip()
+    user   = request.form.get("user",   "").strip()
+    if not folder:
+        return jsonify({"ok": False})
+    save_assignment(folder, user)
+    return jsonify({"ok": True})
 
 # ══════════════════════════════════════════════════════════════════════════
 # Verlauf (Audit Log)
