@@ -3,7 +3,7 @@
 A local server for receiving, storing, and displaying debug streams from the Loxone Miniserver.  
 Data is received via UDP and managed through a web interface in the browser.
 
-![Loxone Debug Server](https://img.shields.io/badge/Version-1.05-69A533?style=flat-square)
+![Loxone Debug Server](https://img.shields.io/badge/Version-1.06-69A533?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/Flask-3.0+-000000?style=flat-square&logo=flask)
 
@@ -79,9 +79,11 @@ Real-time overview of all active and ended debug streams.
 | Status | Active (green dot) or Ended |
 | IP Address | Source IP of the Miniserver |
 | Start | Time of the first packet |
-| Runtime / Duration | How long the stream has been / was running |
+| Runtime / Duration | How long the stream has been / was running (auto-formatted: s / min s / h min s) |
 | Last Packet | How many seconds ago data was last received |
 | Volume | Amount of data received |
+| Serial Numbers | Up to 3 detected Loxone device serial numbers (`504F94...`) found in the log — air devices (`504F94FFFE...`) are excluded |
+| Assigned To | User responsible for this session — select from dropdown, saved instantly |
 
 **Actions per stream:**
 
@@ -182,12 +184,13 @@ UDP/
 ├── users.json          # User data (auto-created)
 ├── settings.json       # Configuration (auto-created)
 ├── audit.json          # History / audit log (auto-created)
+├── assignments.json    # Session user assignments (auto-created)
 └── logs/
     └── 192.168.1.100_2026-04-25_14-30-00/
         └── 2026-04-25_14-30-00.log
 ```
 
-> `users.json`, `settings.json`, `audit.json` and the `logs/` folder are listed in `.gitignore` and are not uploaded to the repository.
+> `users.json`, `settings.json`, `audit.json`, `assignments.json` and the `logs/` folder are listed in `.gitignore` and are not uploaded to the repository.
 
 ---
 
@@ -213,6 +216,11 @@ In Loxone Config under **Miniserver → Settings → Logging & Monitoring**:
 ---
 
 ## Changelog
+
+### V1.06
+- **Runtime formatting:** Durations are now human-readable — under 60 s shown as `45 s`, under 1 h as `2 min 30 s`, above 1 h as `1h 30min 45s`
+- **Serial number detection:** The dashboard scans each log file for Loxone device serial numbers (`504F94...`) and shows up to 3 per session; air devices (`504F94FFFE...`) are automatically excluded
+- **User assignment:** Each session in the dashboard can be assigned to a responsible user via a dropdown — the selection is saved instantly without page reload (`assignments.json`)
 
 ### V1.05
 - New setting: Auto-Update — checks GitHub periodically for new versions and automatically runs `git pull` + restarts when an update is found
