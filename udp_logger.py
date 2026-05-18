@@ -803,7 +803,7 @@ nav {
                 color: #666; text-decoration: none; background: #fff; }
 .login-lang a:hover { background: #f0f0f0; }
 .login-lang a.lang-active { background: var(--green); color: #fff; }
-.container { max-width: 1240px; margin: 0 auto; padding: 28px 24px; }
+.container { max-width: 1600px; margin: 0 auto; padding: 28px 24px; }
 .page-header { margin-bottom: 24px; }
 .page-header h1 { font-size: 20px; font-weight: 700; color: var(--text); }
 .page-header p  { font-size: 13px; color: var(--muted); margin-top: 3px; }
@@ -838,7 +838,7 @@ th { text-align: left; padding: 10px 16px; font-size: 11px; font-weight: 700;
      color: var(--muted); text-transform: uppercase; letter-spacing: .06em;
      border-bottom: 2px solid var(--border); white-space: nowrap; }
 td { padding: 10px 16px; font-size: 13px; border-bottom: 1px solid #f0f0f0;
-     vertical-align: middle; }
+     vertical-align: middle; white-space: nowrap; }
 tr:last-child td { border-bottom: none; }
 tbody tr:hover td { background: #f9f9f9; }
 .badge {
@@ -1171,11 +1171,12 @@ document.addEventListener('change', function(e) {
     def _serial_badges(serials: list) -> str:
         if not serials:
             return '<span style="color:#bbb;font-size:11px">—</span>'
-        return " ".join(
+        badges = " ".join(
             f'<span style="font-family:monospace;font-size:11px;background:#f0f0f0;'
-            f'border:1px solid #ddd;border-radius:3px;padding:1px 5px">{sn}</span>'
+            f'border:1px solid #ddd;border-radius:3px;padding:1px 5px;white-space:nowrap">{sn}</span>'
             for sn in serials
         )
+        return f'<span style="display:inline-flex;gap:4px;flex-wrap:nowrap">{badges}</span>'
 
     def _user_select(folder: str) -> str:
         current = assignments.get(folder, "")
