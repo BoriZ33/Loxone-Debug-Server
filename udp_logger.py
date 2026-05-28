@@ -200,6 +200,7 @@ TRANSLATIONS = {
         "tbl_serials": "Seriennummern", "tbl_assigned_user": "Zuständig",
         "assign_none": "— niemand —",
         "dash_stat_of": "von", "dash_stat_unlimited": "unbegrenzt",
+        "err_delete_active": "Aktive Streams können nicht gelöscht werden — bitte warte bis der Stream beendet ist.",
     },
     "en": {
         "nav_dashboard": "Dashboard", "nav_users": "Users",
@@ -312,6 +313,7 @@ TRANSLATIONS = {
         "tbl_serials": "Serial Numbers", "tbl_assigned_user": "Assigned To",
         "assign_none": "— nobody —",
         "dash_stat_of": "of", "dash_stat_unlimited": "unlimited",
+        "err_delete_active": "Active streams cannot be deleted — please wait until the stream has ended.",
     },
 }
 
@@ -1224,12 +1226,8 @@ document.addEventListener('change', function(e) {
                   <a class="btn btn-sm btn-outline" href="{url_for('files', folder=folder)}">{t('btn_folder')}</a>
                   <a class="btn btn-sm btn-primary" href="{url_for('download_folder', folder=folder)}">{t('btn_zip')}</a>
                   <a class="btn btn-sm btn-success" href="{url_for('live_stream', ip=s['ip'])}">{t('btn_live')}</a>
-                  <form class="inline" method="post" action="{url_for('delete_folder')}"
-                        onsubmit="return confirm({json.dumps(t('confirm_delete_folder', name=folder))})">
-                    <input type="hidden" name="folder" value="{folder}">
-                    <input type="hidden" name="next" value="dashboard">
-                    <button class="btn btn-sm btn-danger">{t('btn_delete')}</button>
-                  </form>
+                  <button class="btn btn-sm btn-danger" disabled title="{t('err_delete_active')}"
+                          style="opacity:.4;cursor:not-allowed">{t('btn_delete')}</button>
                 </div>
               </td>
             </tr>"""
@@ -1558,6 +1556,13 @@ def delete_folder():
     except Exception:
         flash(t("files_invalid_path"), "error")
         return redirect(url_for("dashboard" if next_page == "dashboard" else "files"))
+    # Aktive Streams dürfen nicht gelöscht werden
+    with _lock:
+        active_folders = {s.get("folder") for s in active_streams.values()}
+    if folder in active_folders:
+        flash(t("err_delete_active"), "error")
+        return redirect(url_for("dashboard" if next_page == "dashboard" else "files"))
+
     if path.is_dir():
         shutil.rmtree(path)
         add_audit(t("audit_del_folder"), folder)
