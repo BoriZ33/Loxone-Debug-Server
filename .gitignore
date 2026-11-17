@@ -3,6 +3,9 @@ logs/
 users.json
 audit.json
 settings.json
+assignments.json
+.installed_commit
+*.update-tmp
 
 # Python
 __pycache__/

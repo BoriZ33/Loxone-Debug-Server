@@ -22,7 +22,7 @@ AUDIT_FILE       = Path("audit.json")
 SETTINGS_FILE    = Path("settings.json")
 ASSIGNMENTS_FILE = Path("assignments.json")
 STREAM_TIMEOUT = 30
-VERSION        = "V1.07"
+VERSION        = "V1.08"
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -193,10 +193,10 @@ TRANSLATIONS = {
         "footer": f"Loxone Debug Server {VERSION} &mdash; von Silas Hoffmann",
         "update_title": "Software-Update",
         "update_status_ok": "Aktuell", "update_status_available": "Update verfügbar",
-        "update_btn_check": "Auf Update prüfen", "update_btn_pull": "Git Pull",
+        "update_btn_check": "Auf Update prüfen", "update_btn_pull": "Update installieren",
         "update_checking": "Prüfe…", "update_pulling": "Wird geladen…",
-        "update_pull_ok": "Git Pull erfolgreich.", "update_pull_fail": "Git Pull fehlgeschlagen",
-        "audit_update_check": "Update geprüft", "audit_git_pull": "Git Pull",
+        "update_pull_ok": "Update installiert – bitte Server neu starten.", "update_pull_fail": "Update fehlgeschlagen",
+        "audit_update_check": "Update geprüft", "audit_git_pull": "Update installiert",
         "tbl_serials": "Seriennummer (MAC)", "tbl_assigned_user": "Zuständig",
         "assign_none": "— niemand —",
         "dash_stat_of": "von", "dash_stat_unlimited": "unbegrenzt",
@@ -306,10 +306,10 @@ TRANSLATIONS = {
         "footer": f"Loxone Debug Server {VERSION} &mdash; by Silas Hoffmann",
         "update_title": "Software Update",
         "update_status_ok": "Up to date", "update_status_available": "Update available",
-        "update_btn_check": "Check for update", "update_btn_pull": "Git Pull",
+        "update_btn_check": "Check for update", "update_btn_pull": "Install update",
         "update_checking": "Checking…", "update_pulling": "Pulling…",
-        "update_pull_ok": "Git pull successful.", "update_pull_fail": "Git pull failed",
-        "audit_update_check": "Update check", "audit_git_pull": "Git Pull",
+        "update_pull_ok": "Update installed – please restart the server.", "update_pull_fail": "Update failed",
+        "audit_update_check": "Update check", "audit_git_pull": "Update installed",
         "tbl_serials": "Serial Number (MAC)", "tbl_assigned_user": "Assigned To",
         "assign_none": "— nobody —",
         "dash_stat_of": "of", "dash_stat_unlimited": "unlimited",
@@ -759,10 +759,26 @@ def _load_existing_sessions():
 # ── Git-Hilfsfunktionen ────────────────────────────────────────────────────
 _GIT_DIR = Path(__file__).parent
 
+def _git_exe() -> str | None:
+    """git im PATH oder an den üblichen Windows-Installationsorten suchen."""
+    exe = shutil.which("git")
+    if exe:
+        return exe
+    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                 os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")):
+        cand = Path(base) / "Git" / "cmd" / "git.exe"
+        if cand.is_file():
+            return str(cand)
+    return None
+
 def _git(*args, timeout=20) -> tuple[int, str, str]:
+    exe = _git_exe()
+    if not exe:
+        return -1, "", "git not found"
     try:
         r = subprocess.run(
-            ["git"] + list(args),
+            [exe] + list(args),
             capture_output=True, text=True, timeout=timeout,
             cwd=str(_GIT_DIR)
         )
@@ -773,6 +789,64 @@ def _git(*args, timeout=20) -> tuple[int, str, str]:
         return -1, "", "timeout"
     except Exception as e:
         return -1, "", str(e)
+
+def _use_git() -> bool:
+    """Git-Update nur, wenn git vorhanden ist UND der Programmordner ein Git-Klon ist."""
+    return _git_exe() is not None and (_GIT_DIR / ".git").exists()
+
+# ── Update ohne Git: direkt von GitHub (HTTPS, nur Standardbibliothek) ────
+GITHUB_REPO      = "BoriZ33/Loxone-Debug-Server"
+GITHUB_BRANCH    = "main"
+_INSTALLED_FILE  = _GIT_DIR / ".installed_commit"   # SHA der zuletzt per ZIP installierten Version
+# Dateien/Ordner aus dem Repo-ZIP, die nie überschrieben werden (Laufzeitdaten)
+_UPDATE_PROTECTED = {"logs", "users.json", "audit.json", "settings.json", "assignments.json", ".installed_commit"}
+
+def _http_get(url: str, timeout: int = 30) -> bytes:
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "Loxone-Debug-Server-Updater",
+                                               "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+def _remote_commit() -> str:
+    data = json.loads(_http_get(f"https://api.github.com/repos/{GITHUB_REPO}/commits/{GITHUB_BRANCH}"))
+    return data["sha"]
+
+def _local_commit() -> str:
+    if _use_git():
+        _, sha, _ = _git("rev-parse", "HEAD")
+        return sha
+    try:
+        return _INSTALLED_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""          # unbekannt (Ordner wurde manuell kopiert)
+
+def _install_from_zip(sha: str) -> list:
+    """Lädt den Repo-Stand als ZIP und überschreibt die Programmdateien. Gibt geänderte Dateien zurück."""
+    blob = _http_get(f"https://codeload.github.com/{GITHUB_REPO}/zip/{sha}", timeout=120)
+    changed = []
+    base = _GIT_DIR.resolve()
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        for info in zf.infolist():
+            parts = info.filename.split("/", 1)        # erster Ordner = "<repo>-<sha>/"
+            if len(parts) < 2 or not parts[1] or info.is_dir():
+                continue
+            rel = parts[1]
+            if rel.split("/", 1)[0] in _UPDATE_PROTECTED:
+                continue
+            target = (base / rel).resolve()
+            if not str(target).startswith(str(base)):  # Pfad-Traversal verhindern
+                continue
+            data = zf.read(info)
+            if target.is_file() and target.read_bytes() == data:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(target.name + ".update-tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, target)                     # atomar ersetzen
+            changed.append(rel)
+    _INSTALLED_FILE.write_text(sha, encoding="utf-8")
+    return changed
 
 # ── UDP Listener ───────────────────────────────────────────────────────────
 def udp_listener():
@@ -2379,25 +2453,45 @@ def restart_server():
 @app.route("/api/check_update", methods=["POST"])
 @admin_req
 def api_check_update():
-    rc, _, err = _git("fetch", "origin", timeout=20)
-    if rc != 0:
-        return jsonify({"ok": False, "msg": err or "fetch failed"})
-    _, local,  _ = _git("rev-parse", "HEAD")
-    _, remote, _ = _git("rev-parse", "origin/main")
-    up_to_date = (local == remote) or not local or not remote
+    if _use_git():
+        method = "git"
+        rc, _, err = _git("fetch", "origin", timeout=20)
+        if rc != 0:
+            return jsonify({"ok": False, "msg": err or "fetch failed"})
+        _, local,  _ = _git("rev-parse", "HEAD")
+        _, remote, _ = _git("rev-parse", f"origin/{GITHUB_BRANCH}")
+        up_to_date = (local == remote) or not local or not remote
+    else:
+        method = "download"
+        try:
+            remote = _remote_commit()
+        except Exception as e:
+            return jsonify({"ok": False, "msg": f"GitHub nicht erreichbar: {e}"})
+        local = _local_commit()
+        up_to_date = local == remote
     add_audit(t("audit_update_check"),
-              f"local={local[:7]}  remote={remote[:7]}  {'up-to-date' if up_to_date else 'UPDATE AVAILABLE'}",
+              f"[{method}] local={local[:7] or '?'}  remote={remote[:7]}  {'up-to-date' if up_to_date else 'UPDATE AVAILABLE'}",
               user=session.get("user", "?"))
-    return jsonify({"ok": True, "up_to_date": up_to_date,
-                    "current": local[:7], "remote": remote[:7]})
+    return jsonify({"ok": True, "up_to_date": up_to_date, "method": method,
+                    "current": local[:7] or VERSION, "remote": remote[:7]})
 
 @app.route("/api/git_pull", methods=["POST"])
 @admin_req
 def api_git_pull():
-    rc, out, err = _git("pull", timeout=60)
-    msg = out or err
+    if _use_git():
+        rc, out, err = _git("pull", timeout=60)
+        msg, ok = out or err, rc == 0
+    else:
+        try:
+            sha = _remote_commit()
+            changed = _install_from_zip(sha)
+            ok = True
+            msg = (f"{sha[:7]}: {len(changed)} Datei(en) aktualisiert ({', '.join(changed)})"
+                   if changed else f"{sha[:7]}: keine Dateien geändert")
+        except Exception as e:
+            ok, msg = False, str(e)
     add_audit(t("audit_git_pull"), msg[:200], user=session.get("user", "?"))
-    return jsonify({"ok": rc == 0, "msg": msg})
+    return jsonify({"ok": ok, "msg": msg})
 
 # ══════════════════════════════════════════════════════════════════════════
 # Zuordnung (User-Assignment pro Session)

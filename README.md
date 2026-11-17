@@ -221,6 +221,10 @@ In Loxone Config under **Miniserver → Settings → Logging & Monitoring**:
 
 ## Changelog
 
+### V1.08
+- **Software update without Git:** If `git` is not installed (or the program folder is not a Git clone), *Check for update* / *Install update* now download the current version directly from GitHub over HTTPS (standard library only). Runtime data (`logs/`, `users.json`, `settings.json`, `audit.json`, `assignments.json`) is never overwritten; the installed commit is stored in `.installed_commit`
+- Git is also found in its default Windows install folders when it is missing from `PATH`
+
 ### V1.07
 - **LxMon export:** Each stream is additionally written as a `.LxMon` file in exactly the format Loxone Config uses (header, CArchive records, timestamps, row colours, original packets) — can be opened directly in Loxone Config
 - **Correct sender IP:** IP is read from the fixed header position instead of scanning for RFC1918-like bytes (which produced bogus IPs such as `10.241.58.1`)
