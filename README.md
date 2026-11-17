@@ -68,7 +68,7 @@ The server listens on **UDP port 7777** for incoming debug packets from the Loxo
 - Every session is written twice: a **`.log` in the layout of the Loxone Config monitor** and a **`.LxMon` file in the exact Loxone Config format** (open it in Loxone Config → Monitor)
 - `.log` layout (one line per telegram, CRLF, UTF-8): `TelegramID IP Miniserver-time Text`, e.g.  
   `00000000 192.168.178.100 18:11:10.462 LNK got AirBase 0C000002 queue level: 0`
-  - Like the monitor, long telegrams are split into rows of 256 characters and at real line breaks — every row starts with the telegram ID
+  - Each telegram is written completely on one line (Loxone Config would split after 256 characters — intentionally not copied); only real line breaks inside a telegram produce additional rows, every row starts with the telegram ID
   - Sequence gaps are reported like Loxone Config: `00000330 192.168.178.100              SEQ_ERROR 1 lines missing 417/415`
   - Telegram IDs match the row numbers in the `.LxMon` file
 - Each session gets its own folder in the format `IP_DATE_TIME`  
@@ -228,7 +228,7 @@ In Loxone Config under **Miniserver → Settings → Logging & Monitoring**:
 
 ### V1.09
 - **`.log` in Loxone Config monitor layout:** `TelegramID IP Miniserver-time Text` — verified against a Loxone Config text export (5,896 telegrams / 8,884 rows): all rows identical except where Loxone Config itself prints garbage (random negative numbers in `ICMP Ping …us` / `LOXONE Config data command …`, and memory garbage after telegrams without a terminating null byte) — the server writes the real values there
-- Long telegrams split into 256-character rows and at line breaks, each row prefixed with the telegram ID; vertical tabs no longer break a row
+- One line per telegram (no 256-character split); real line breaks inside a telegram become separate rows, each prefixed with the telegram ID; vertical tabs no longer break a row
 - Invalid UTF-8 bytes are shown as spaces, trailing spaces removed (as in Config)
 - Fixed messages decoded: `HTTP Keep-Alive`, `HTTP No Keep-Alive`, `HTTP <x> disconnected`, `ICMP Ping`, `LOXONE Config data command`
 - `SEQ_ERROR` rows for missing/reordered telegrams (per sender), also written to the `.LxMon`

@@ -603,22 +603,18 @@ def lox_text(pkt: bytes) -> str:
     return text
 
 
-MONITOR_CHUNK = 256   # Loxone Config zeigt lange Telegramme in Teilzeilen zu 256 Zeichen
-
-
 def monitor_line(index: int, ip: str, pkt: bytes = b"", note: str = "") -> str:
     """Zeile(n) im Format des Loxone-Config-Monitors:
     'TelegrammID IP Miniserver-Zeit Text' bzw. für Config-eigene Zeilen (SEQ_ERROR)
-    'TelegrammID IP <13 Leerzeichen>Text'. Wie in Config wird ein Telegramm an echten
-    Zeilenumbrüchen und nach je 256 Zeichen in Teilzeilen geteilt; JEDE Zeile beginnt
-    mit der Telegramm-ID. Zeilenende CRLF wie im Config-Export."""
+    'TelegrammID IP <13 Leerzeichen>Text'. Ein Telegramm steht vollständig in einer
+    Zeile (Config würde nach 256 Zeichen teilen – bewusst nicht übernommen). Nur echte
+    Zeilenumbrüche im Telegramm ergeben eigene Zeilen; JEDE Zeile beginnt mit der
+    Telegramm-ID. Zeilenende CRLF wie im Config-Export."""
     if not pkt:
         return f"{index:08d} {ip} {note}\r\n"
     prefix = f"{index:08d} {ip} {lox_time(pkt)} "
-    rows = []
-    for part in re.split(r"\r\n|\n|\r", lox_text(pkt)):
-        part = part.rstrip(" ")               # Config entfernt Leerzeichen am Zeilenende
-        rows += [part[i:i + MONITOR_CHUNK] for i in range(0, len(part), MONITOR_CHUNK)] or [""]
+    rows = [part.rstrip(" ")                  # Config entfernt Leerzeichen am Zeilenende
+            for part in re.split(r"\r\n|\n|\r", lox_text(pkt))]
     if len(rows) > 1 and rows[-1] == "":
         rows.pop()                            # abschließender Umbruch erzeugt keine Leerzeile
     return "".join(f"{prefix}{r}\r\n" for r in rows)
