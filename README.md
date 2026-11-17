@@ -65,7 +65,12 @@ The server listens on **UDP port 7777** for incoming debug packets from the Loxo
 - The **sender IP** is read from the packet header (offset 16) — correct behind NAT/VPN
 - Gateway and client Miniservers get **separate streams**, even when they arrive from the same public IP
 - The **serial number (MAC)** of each sender is determined from the packet header (last MAC bytes) and confirmed via log messages (e.g. `192-168-178-210.504F94D019C2.dyndns…`)
-- Every session is written twice: a readable `.log` and a **`.LxMon` file in the exact Loxone Config format** (open it in Loxone Config → Monitor)
+- Every session is written twice: a **`.log` in the layout of the Loxone Config monitor** and a **`.LxMon` file in the exact Loxone Config format** (open it in Loxone Config → Monitor)
+- `.log` layout (one line per telegram, CRLF, UTF-8): `TelegramID IP Miniserver-time Text`, e.g.  
+  `00000000 192.168.178.100 18:11:10.462 LNK got AirBase 0C000002 queue level: 0`
+  - Like the monitor, long telegrams are split into rows of 256 characters and at real line breaks — every row starts with the telegram ID
+  - Sequence gaps are reported like Loxone Config: `00000330 192.168.178.100              SEQ_ERROR 1 lines missing 417/415`
+  - Telegram IDs match the row numbers in the `.LxMon` file
 - Each session gets its own folder in the format `IP_DATE_TIME`  
   (e.g. `192.168.1.100_2026-04-25_14-30-00`)
 - Streams that have not sent data for more than X seconds are considered ended (configurable)
@@ -189,7 +194,7 @@ UDP/
 ├── assignments.json    # Session user assignments (auto-created)
 └── logs/
     └── 192.168.1.100_2026-04-25_14-30-00/
-        ├── 2026-04-25_14-30-00.log     # readable text log
+        ├── 2026-04-25_14-30-00.log     # text log in Loxone Config monitor layout
         ├── 2026-04-25_14-30-00.LxMon   # Loxone Config monitor file (byte-identical format)
         └── stream.json                 # sender IP, external IP, serial number
 ```
@@ -220,6 +225,13 @@ In Loxone Config under **Miniserver → Settings → Logging & Monitoring**:
 ---
 
 ## Changelog
+
+### V1.09
+- **`.log` in Loxone Config monitor layout:** `TelegramID IP Miniserver-time Text` — verified against a Loxone Config text export (5,896 telegrams / 8,884 rows): all rows identical except where Loxone Config itself prints garbage (random negative numbers in `ICMP Ping …us` / `LOXONE Config data command …`, and memory garbage after telegrams without a terminating null byte) — the server writes the real values there
+- Long telegrams split into 256-character rows and at line breaks, each row prefixed with the telegram ID; vertical tabs no longer break a row
+- Invalid UTF-8 bytes are shown as spaces, trailing spaces removed (as in Config)
+- Fixed messages decoded: `HTTP Keep-Alive`, `HTTP No Keep-Alive`, `HTTP <x> disconnected`, `ICMP Ping`, `LOXONE Config data command`
+- `SEQ_ERROR` rows for missing/reordered telegrams (per sender), also written to the `.LxMon`
 
 ### V1.08
 - **Software update without Git:** If `git` is not installed (or the program folder is not a Git clone), *Check for update* / *Install update* now download the current version directly from GitHub over HTTPS (standard library only). Runtime data (`logs/`, `users.json`, `settings.json`, `audit.json`, `assignments.json`) is never overwritten; the installed commit is stored in `.installed_commit`

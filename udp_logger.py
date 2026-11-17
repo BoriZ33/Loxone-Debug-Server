@@ -22,7 +22,7 @@ AUDIT_FILE       = Path("audit.json")
 SETTINGS_FILE    = Path("settings.json")
 ASSIGNMENTS_FILE = Path("assignments.json")
 STREAM_TIMEOUT = 30
-VERSION        = "V1.08"
+VERSION        = "V1.09"
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -554,13 +554,79 @@ def split_lox_packets(data: bytes) -> list:
 
 
 def _decode_lox_text(raw: bytes) -> str:
+    """Wie Loxone Config: UTF-8, ungültige Bytes werden zu Leerzeichen.
+    Vertikal-Tab (\\x0b) wird zum Leerzeichen – der Monitor zeigt ihn innerhalb der
+    Zeile, nur die Kopierfunktion von Config macht daraus einen Umbruch ohne ID.
+    Echte Zeilenumbrüche bleiben erhalten (monitor_line macht daraus eigene Zeilen)."""
     raw = raw.split(b"\x00", 1)[0]
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        text = raw.decode("cp1252", errors="replace")
-    # Mehrzeilige Meldungen (z.B. HTTP-Proxy) einzeilig darstellen
-    return text.replace("\r\n", " ⏎ ").replace("\n", " ⏎ ").replace("\r", " ").strip()
+    text = raw.decode("utf-8", errors="replace").replace("�", " ")
+    return text.replace("\x0b", " ")
+
+
+# Feste Meldungen ohne Text (Meldungs-ID = Bytes 6–7 im Header), aus Loxone-Config-Export
+_LOX_FIXED_MSGS = {
+    0x0647: "HTTP Keep-Alive",
+    0x0648: "HTTP No Keep-Alive",
+}
+# Vorlagen für Text-Telegramme mit Meldungs-ID (Text = Parameter)
+_LOX_TEXT_TEMPLATES = {
+    0x0643: "HTTP {} disconnected",
+}
+
+
+def lox_time(pkt: bytes) -> str:
+    """Miniserver-Zeitstempel des Telegramms (Sekunden seit 2009 + ms) als HH:MM:SS.mmm."""
+    ms, secs = struct.unpack_from("<HI", pkt, 10)
+    secs %= 86400
+    return f"{secs // 3600:02d}:{secs // 60 % 60:02d}:{secs % 60:02d}.{ms % 1000:03d}"
+
+
+def lox_text(pkt: bytes) -> str:
+    """Text eines Telegramms genau so, wie der Loxone-Config-Monitor ihn anzeigt."""
+    msg_id = struct.unpack_from("<H", pkt, 6)[0]
+    if len(pkt) <= LOX_HEADER_LEN:
+        return _LOX_FIXED_MSGS.get(msg_id, f"MSG {msg_id:04X}")
+    kind = pkt[28]
+    if kind == 3:
+        # Meldung mit Parametern. Loxone Config zeigt bei den Zahlen zufällige negative
+        # Werte (Fehler in Config, z.B. "-1001164848us"); wir schreiben die echten Werte.
+        if msg_id == 0x0450 and len(pkt) >= 34 and pkt[33] == 1:          # int32, \x01, Text
+            val = struct.unpack_from("<i", pkt, 29)[0]
+            return f"ICMP Ping {val}us {_decode_lox_text(pkt[34:])}"
+        if msg_id == 0x0901 and len(pkt) >= 37:                           # int32, int32
+            cmd, ln = struct.unpack_from("<ii", pkt, 29)
+            return f"LOXONE Config data command {cmd} Len {ln}"
+        return f"MSG {msg_id:04X} {pkt[29:].rstrip(bytes(1)).hex(' ')}"
+    text = _decode_lox_text(pkt[29:])
+    if msg_id in _LOX_TEXT_TEMPLATES:          # Vorlage mit Text als Parameter
+        return _LOX_TEXT_TEMPLATES[msg_id].format(text)
+    return text
+
+
+MONITOR_CHUNK = 256   # Loxone Config zeigt lange Telegramme in Teilzeilen zu 256 Zeichen
+
+
+def monitor_line(index: int, ip: str, pkt: bytes = b"", note: str = "") -> str:
+    """Zeile(n) im Format des Loxone-Config-Monitors:
+    'TelegrammID IP Miniserver-Zeit Text' bzw. für Config-eigene Zeilen (SEQ_ERROR)
+    'TelegrammID IP <13 Leerzeichen>Text'. Wie in Config wird ein Telegramm an echten
+    Zeilenumbrüchen und nach je 256 Zeichen in Teilzeilen geteilt; JEDE Zeile beginnt
+    mit der Telegramm-ID. Zeilenende CRLF wie im Config-Export."""
+    if not pkt:
+        return f"{index:08d} {ip} {note}\r\n"
+    prefix = f"{index:08d} {ip} {lox_time(pkt)} "
+    rows = []
+    for part in re.split(r"\r\n|\n|\r", lox_text(pkt)):
+        part = part.rstrip(" ")               # Config entfernt Leerzeichen am Zeilenende
+        rows += [part[i:i + MONITOR_CHUNK] for i in range(0, len(part), MONITOR_CHUNK)] or [""]
+    if len(rows) > 1 and rows[-1] == "":
+        rows.pop()                            # abschließender Umbruch erzeugt keine Leerzeile
+    return "".join(f"{prefix}{r}\r\n" for r in rows)
+
+
+def seq_error_note(seq: int, last: int) -> str:
+    """Loxone-Config-Meldung bei Lücken/Vertauschungen in der Telegramm-Sequenznummer."""
+    return f"{' ' * 13}SEQ_ERROR {seq - last - 1} lines missing {seq}/{last}"
 
 
 def parse_lox_packet(pkt: bytes) -> dict:
@@ -574,15 +640,8 @@ def parse_lox_packet(pkt: bytes) -> dict:
     else:
         mac_tail = pkt[21:22].hex().upper() if pkt[21] else ""
     kind = pkt[28] if len(pkt) > LOX_HEADER_LEN else None
-    text = ""
-    if kind == 1:
-        text = _decode_lox_text(pkt[29:])
-    elif kind == 3:
-        # Ping-Ergebnis: binärer Teil + "\x01<IP>" — druckbaren Rest anzeigen
-        rest = pkt[29:].split(b"\x00\x01")[-1]
-        rest = _decode_lox_text(rest)
-        text = f"ICMP {rest}" if rest else ""
-    return {"ip": ip, "mac_tail": mac_tail, "kind": kind, "text": text}
+    seq = struct.unpack_from("<H", pkt, 8)[0]
+    return {"ip": ip, "mac_tail": mac_tail, "kind": kind, "seq": seq, "text": lox_text(pkt)}
 
 
 def find_own_serial(text: str, ip: str, mac_tail: str) -> str | None:
@@ -633,10 +692,13 @@ _LXMON_COLORS = {
     "fs":      (0xC8DCF0, 0xF0FFFF, 0x000000),
     "dns":     (0xF0C8F0, 0xFFF0FF, 0x000000),
     "blank":   (0xFFFFFF, 0xFFFFFF, 0x000000),
+    "note":    (0x8CBEFF, 0xA8E4FF, 0x000000),   # Config-eigene Zeilen (SEQ_ERROR)
 }
 
 
 def _lxmon_color_family(pkt: bytes) -> str:
+    if not pkt:
+        return "note"
     if len(pkt) <= LOX_HEADER_LEN:
         return "http"
     if pkt[28] == 3:
@@ -658,7 +720,16 @@ def _lxmon_color_family(pkt: bytes) -> str:
     return "default"
 
 
-def lxmon_record(pkt: bytes, index: int, when: datetime, src_ip: bytes = b"") -> bytes:
+def _mfc_cstring(text: str) -> bytes:
+    """MFC-CArchive-Unicode-CString (ff fe ff + Länge + UTF-16LE)."""
+    data = text.encode("utf-16le")
+    n = len(data) // 2
+    if n < 0xFF:
+        return b"\xff\xfe\xff" + bytes([n]) + data
+    return b"\xff\xfe\xff\xff" + struct.pack("<H", n) + data
+
+
+def lxmon_record(pkt: bytes, index: int, when: datetime, src_ip: bytes = b"", note: str = "") -> bytes:
     even_bg, odd_bg, fg = _LXMON_COLORS[_lxmon_color_family(pkt)]
     bg = odd_bg if index & 1 else even_bg
     systime = struct.pack("<8H", when.year, when.month, (when.weekday() + 1) % 7, when.day,
@@ -666,22 +737,23 @@ def lxmon_record(pkt: bytes, index: int, when: datetime, src_ip: bytes = b"") ->
     return ((_LXMON_CLASS if index == 0 else _LXMON_CLASSREF)
             + struct.pack("<I", 11) + systime
             + struct.pack("<III", 0, bg, fg)
-            + b"\xff\xfe\xff\x00"                    # leerer Unicode-CString
+            + _mfc_cstring(note)                     # leer, außer bei Config-Zeilen (SEQ_ERROR)
             + (src_ip or pkt[16:20])                 # Absender-IP
             + b"\x00" * 16
             + struct.pack("<iI", -1, 0)
             + struct.pack("<H", len(pkt)) + pkt)
 
 
-def lxmon_append(path: str, count: int, pkts: list, when: datetime, src_ip: str = "") -> int:
-    """Hängt Pakete an eine .LxMon-Datei an und aktualisiert den Zeilenzähler. Gibt neuen Zähler zurück."""
+def lxmon_append(path: str, count: int, entries: list, when: datetime, src_ip: str = "") -> int:
+    """Hängt Zeilen (Liste aus (paket, notiz)) an eine .LxMon-Datei an und aktualisiert
+    den Zeilenzähler. Gibt den neuen Zähler zurück."""
     p = Path(path)
     try:
         src = socket.inet_aton(src_ip) if src_ip else b""
     except OSError:
         src = b""
-    body = b"".join(lxmon_record(pk, count + i, when, src) for i, pk in enumerate(pkts))
-    count += len(pkts)
+    body = b"".join(lxmon_record(pk, count + i, when, src, note) for i, (pk, note) in enumerate(entries))
+    count += len(entries)
     if not p.exists():
         p.write_bytes(struct.pack("<IH", 10, count) + body)
         return count
@@ -967,35 +1039,45 @@ def _handle_datagram(data: bytes, ext_ip: str):
             _rotate_if_needed(s)
 
             meta_changed = False
-            lines = []
+            entries = []          # (paket, notiz) – identisch für .log und .LxMon
+            seqs = s.setdefault("seq", {})
             for pk, info in items:
+                if pk is None:    # unbekanntes Format: nur Text vorhanden
+                    entries.append((b"", f"{ts} {info['text']}"))
+                    continue
                 if len(info["mac_tail"]) > len(s["mac_tail"]):   # 1f fa liefert 2 Bytes, 18 f9 nur 1
                     s["mac_tail"] = info["mac_tail"]
                     meta_changed = True
+                # Sequenzprüfung wie Loxone Config (pro Absender und Pakettyp)
+                seq_key = pk[:2]
+                last = seqs.get(seq_key)
+                if last is not None and info["seq"] != (last + 1) & 0xFFFF:
+                    entries.append((b"", seq_error_note(info["seq"], last)))
+                seqs[seq_key] = info["seq"]
+                entries.append((pk, ""))
                 text = info["text"]
-                if text:
-                    if not s["serial"]:
-                        sn = find_own_serial(text, ip, s["mac_tail"])
-                        if sn:
-                            s["serial"] = sn
-                            meta_changed = True
-                            print(f"[UDP] Seriennummer {ip}: {sn}")
-                    if _is_valid_msg(text) or pk is not None:
-                        lines.append(f"{ts}  {ip}  {text}\n")
+                if text and not s["serial"]:
+                    sn = find_own_serial(text, ip, s["mac_tail"])
+                    if sn:
+                        s["serial"] = sn
+                        meta_changed = True
+                        print(f"[UDP] Seriennummer {ip}: {sn}")
             if meta_changed:
                 write_stream_meta(s)
+            if not entries:
+                continue
 
-            if lines:
-                chunk = "".join(lines).encode("utf-8")
-                with open(s["logfile"], "ab") as f:
-                    f.write(chunk)
-                s["bytes_written"] += len(chunk)
+            # .log: eine Zeile pro Telegramm, Telegramm-ID = Zeilennummer in der .LxMon
+            first = s["lxmon_count"]
+            chunk = "".join(monitor_line(first + i, ip, pk, note)
+                            for i, (pk, note) in enumerate(entries)).encode("utf-8")
+            with open(s["logfile"], "ab") as f:
+                f.write(chunk)
+            s["bytes_written"] += len(chunk)
 
-            raw = [pk for pk, _ in items if pk is not None]
-            if raw:
-                before = Path(s["lxmon"]).stat().st_size if s["lxmon_count"] else 0
-                s["lxmon_count"] = lxmon_append(s["lxmon"], s["lxmon_count"], raw, now_dt, s["ip"])
-                s["bytes_written"] += Path(s["lxmon"]).stat().st_size - before
+            before = Path(s["lxmon"]).stat().st_size if s["lxmon_count"] else 0
+            s["lxmon_count"] = lxmon_append(s["lxmon"], s["lxmon_count"], entries, now_dt, s["ip"])
+            s["bytes_written"] += Path(s["lxmon"]).stat().st_size - before
 
 _last_cleanup = 0.0
 _last_storage_check = 0.0
