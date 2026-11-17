@@ -6,7 +6,7 @@ Loxone Debug Server V1.02
   - Standard-Login: admin / admin  (bitte sofort aendern)
 """
 
-import io, json, os, re, socket, sys, threading, hashlib, secrets, time, shutil, zipfile, subprocess
+import io, json, os, re, socket, struct, sys, threading, hashlib, secrets, time, shutil, zipfile, subprocess
 from datetime import datetime
 from pathlib import Path
 from flask import (Flask, request, send_file, redirect, url_for,
@@ -22,7 +22,7 @@ AUDIT_FILE       = Path("audit.json")
 SETTINGS_FILE    = Path("settings.json")
 ASSIGNMENTS_FILE = Path("assignments.json")
 STREAM_TIMEOUT = 30
-VERSION        = "V1.06"
+VERSION        = "V1.07"
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -197,7 +197,7 @@ TRANSLATIONS = {
         "update_checking": "Prüfe…", "update_pulling": "Wird geladen…",
         "update_pull_ok": "Git Pull erfolgreich.", "update_pull_fail": "Git Pull fehlgeschlagen",
         "audit_update_check": "Update geprüft", "audit_git_pull": "Git Pull",
-        "tbl_serials": "Seriennummern", "tbl_assigned_user": "Zuständig",
+        "tbl_serials": "Seriennummer (MAC)", "tbl_assigned_user": "Zuständig",
         "assign_none": "— niemand —",
         "dash_stat_of": "von", "dash_stat_unlimited": "unbegrenzt",
         "err_delete_active": "Aktive Streams können nicht gelöscht werden — bitte warte bis der Stream beendet ist.",
@@ -310,7 +310,7 @@ TRANSLATIONS = {
         "update_checking": "Checking…", "update_pulling": "Pulling…",
         "update_pull_ok": "Git pull successful.", "update_pull_fail": "Git pull failed",
         "audit_update_check": "Update check", "audit_git_pull": "Git Pull",
-        "tbl_serials": "Serial Numbers", "tbl_assigned_user": "Assigned To",
+        "tbl_serials": "Serial Number (MAC)", "tbl_assigned_user": "Assigned To",
         "assign_none": "— nobody —",
         "dash_stat_of": "of", "dash_stat_unlimited": "unlimited",
         "err_delete_active": "Active streams cannot be deleted — please wait until the stream has ended.",
@@ -423,6 +423,20 @@ def find_serials(logfile: str, max_count: int = 3) -> list:
         pass
     return result
 
+def stream_serials(s: dict) -> list:
+    """Seriennummer (MAC) des sendenden Miniservers; alte Ordner ohne stream.json: Text-Scan wie bisher."""
+    own = format_serial(s)
+    if own:
+        return [own]
+    if s.get("has_meta"):
+        return []
+    return find_serials(s["logfile"])
+
+LOG_FILE_GLOBS = ("*.log", "*.LxMon")
+
+def log_files_in(folder: Path) -> list:
+    return [f for g in LOG_FILE_GLOBS for f in folder.glob(g)]
+
 def safe_path(base: Path, rel: str) -> Path:
     p = (base / rel).resolve()
     if not str(p).startswith(str(base.resolve())):
@@ -494,33 +508,205 @@ def _is_valid_msg(text: str) -> bool:
     # Mindestens 8 Zeichen ODER mindestens ein Leerzeichen (echte Meldungen sind mehrteilig)
     return len(text) >= 8 or ' ' in text
 
-# ── Hilfsfunktion: Stream anhand der Anzeige-IP (intern) suchen ───────────
-def _stream_by_display_ip(display_ip: str):
-    """Gibt das Stream-Dict zurück, das s['ip'] == display_ip hat (oder None)."""
+# ── Hilfsfunktion: Stream anhand Ordner bzw. Anzeige-IP suchen ────────────
+def _stream_by_display_ip(display_ip: str, folder: str = ""):
+    """Gibt das aktive Stream-Dict zurück (bevorzugt per Ordner, sonst per IP)."""
+    if folder:
+        for s in active_streams.values():
+            if s.get("folder") == folder:
+                return s
     for s in active_streams.values():
         if s["ip"] == display_ip:
             return s
     return None
 
-# ── Interne Miniserver-IP aus UDP-Paket extrahieren ───────────────────────
-def extract_miniserver_ip(data: bytes) -> str | None:
-    """Extrahiert die interne Miniserver-IP aus dem UDP-Paket-Header.
+# ══════════════════════════════════════════════════════════════════════════
+# Loxone Debug-Paket (verifiziert gegen LxMon-Dateien von Loxone Config)
+# ══════════════════════════════════════════════════════════════════════════
+#  Offset  Länge  Inhalt
+#   0      2      Magic: 1f fa (Miniserver) | 18 f9 (Linux-Subsystem: lwsd, airplayd …)
+#   2      2      Paketlänge inkl. Header (uint16 LE)
+#   4      4      Flags/Kategorie
+#   8      2      Sequenznummer
+#  10      2      Millisekunden
+#  12      4      Sekunden seit 01.01.2009 (Miniserver-Zeit)
+#  16      4      IP-Adresse des SENDENDEN Miniservers (Gateway / Client)
+#  20      8      1f fa: Bytes 24–25 = letzte 2 Bytes der MAC (= Seriennummer)
+#                 18 f9: Byte 21      = letztes Byte der MAC
+#  28      1      Typ: 1 = Text, 3 = Ping/ICMP-Ergebnis (binär)
+#  29      …      Text (cp1252/UTF-8), \0-terminiert
+# Ein UDP-Datagramm kann mehrere solcher Pakete hintereinander enthalten.
+LOX_MAGICS     = (b"\x1f\xfa", b"\x18\xf9")
+LOX_HEADER_LEN = 28
+_SERIAL_PREFIXES = ("504F94", "EEE000")   # Loxone MAC-OUIs (Gen2 / Gen1)
 
-    Der Loxone Miniserver bettet seine eigene (interne) IP in den Paket-Header ein.
-    Verifiziert via LxMon-Hex-Analyse: c0 a8 b2 d2 = 192.168.178.210 steht immer
-    innerhalb der ersten 80 Bytes vor dem Nachrichtentext.
-    Scannt die ersten 80 Bytes nach einer gültigen RFC1918 privaten IP-Adresse.
+
+def split_lox_packets(data: bytes) -> list:
+    """Zerlegt ein UDP-Datagramm in einzelne Loxone-Pakete (leere Liste = unbekanntes Format)."""
+    out, o = [], 0
+    while o + LOX_HEADER_LEN <= len(data) and data[o:o + 2] in LOX_MAGICS:
+        ln = struct.unpack_from("<H", data, o + 2)[0]
+        if ln < LOX_HEADER_LEN or o + ln > len(data):
+            break
+        out.append(data[o:o + ln])
+        o += ln
+    return out
+
+
+def _decode_lox_text(raw: bytes) -> str:
+    raw = raw.split(b"\x00", 1)[0]
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("cp1252", errors="replace")
+    # Mehrzeilige Meldungen (z.B. HTTP-Proxy) einzeilig darstellen
+    return text.replace("\r\n", " ⏎ ").replace("\n", " ⏎ ").replace("\r", " ").strip()
+
+
+def parse_lox_packet(pkt: bytes) -> dict:
+    """Liest Absender-IP, MAC-Endung und Text aus einem einzelnen Loxone-Paket."""
+    ip = ".".join(str(b) for b in pkt[16:20])
+    if pkt[16:20] in (b"\xff\xff\xff\xff", b"\x00\x00\x00\x00"):
+        ip = None          # Subsystem kennt seine IP (noch) nicht → über MAC/UDP-Quelle zuordnen
+    if pkt[:2] == b"\x1f\xfa":
+        tail = pkt[24:26].hex().upper()
+        mac_tail = tail if tail != "0000" else ""
+    else:
+        mac_tail = pkt[21:22].hex().upper() if pkt[21] else ""
+    kind = pkt[28] if len(pkt) > LOX_HEADER_LEN else None
+    text = ""
+    if kind == 1:
+        text = _decode_lox_text(pkt[29:])
+    elif kind == 3:
+        # Ping-Ergebnis: binärer Teil + "\x01<IP>" — druckbaren Rest anzeigen
+        rest = pkt[29:].split(b"\x00\x01")[-1]
+        rest = _decode_lox_text(rest)
+        text = f"ICMP {rest}" if rest else ""
+    return {"ip": ip, "mac_tail": mac_tail, "kind": kind, "text": text}
+
+
+def find_own_serial(text: str, ip: str, mac_tail: str) -> str | None:
+    """Sucht in einer Meldung die vollständige Seriennummer (= MAC) des Absenders.
+
+    Sicherste Quelle: '192-168-178-210.504F94D019C2.dyndns.loxonecloud.com'.
+    Sonst: eine Seriennummer, deren Endung zur MAC-Endung im Paket-Header passt.
     """
-    for i in range(min(80, len(data) - 3)):
-        b = data[i:i + 4]
-        # RFC1918: 192.168.x.x  |  10.x.x.x  |  172.16–31.x.x
-        if ((b[0] == 192 and b[1] == 168) or
-                b[0] == 10 or
-                (b[0] == 172 and 16 <= b[1] <= 31)):
-            # Letztes Byte darf nicht 0 (Netz) oder 255 (Broadcast) sein
-            if 1 <= b[3] <= 254:
-                return f"{b[0]}.{b[1]}.{b[2]}.{b[3]}"
+    up = text.upper()
+    if not mac_tail or ("504F94" not in up and "EEE000" not in up):
+        return None
+    m = re.search(re.escape(ip.replace(".", "-")) + r"\.([0-9A-F]{12})\.", up)
+    if m and m.group(1).endswith(mac_tail):
+        return m.group(1)
+    for m in re.finditer(r"(?<![0-9A-F])((?:504F94|EEE000)[0-9A-F]{6})(?![0-9A-F])", up):
+        sn = m.group(1)
+        if sn.endswith(mac_tail) and not sn.startswith("504F94FFFE"):
+            return sn
     return None
+
+
+def format_serial(s: dict) -> str:
+    """Anzeigeform: volle Seriennummer oder 504F94··XXXX solange nur die Endung bekannt ist."""
+    if s.get("serial"):
+        return s["serial"]
+    tail = s.get("mac_tail", "")
+    if tail:
+        return "504F94" + "·" * (6 - len(tail)) + tail
+    return ""
+
+
+# ── LxMon-Writer (identisches Format wie Loxone Config / Monitor) ─────────
+#  Datei:   DWORD 10 (Version) | WORD Anzahl Zeilen | Zeilen …
+#  Zeile:   MFC-CArchive-Objekt "CCommonLogDataLine" (1. Zeile mit Klassendef.,
+#           danach Klassenreferenz 0x8001)
+#           DWORD 11 | SYSTEMTIME Empfang | DWORD 0 | COLORREF Hintergrund |
+#           COLORREF Schrift | CString "" | IP (4) | 16×00 | DWORD -1 | DWORD 0 |
+#           WORD Länge | Original-Paket
+LXMON_MAX_LINES = 0xFFFE   # danach würde MFC auf 32-Bit-Zähler wechseln → neue Datei
+_LXMON_CLASS    = b"\xff\xff\x00\x00" + struct.pack("<H", 18) + b"CCommonLogDataLine"
+_LXMON_CLASSREF = b"\x01\x80"
+# Farben (gerade Zeile, ungerade Zeile, Schrift) – aus Loxone-Config-Dateien ermittelt
+_LXMON_COLORS = {
+    "default": (0x8CF0C8, 0xA8FFF0, 0x000000),
+    "http":    (0xF0008C, 0xFF00A8, 0xFFFFFF),
+    "tcp":     (0xC84040, 0xF04C4C, 0x00FFFF),
+    "icmp":    (0x808080, 0x999999, 0xFFFFFF),
+    "fs":      (0xC8DCF0, 0xF0FFFF, 0x000000),
+    "dns":     (0xF0C8F0, 0xFFF0FF, 0x000000),
+    "blank":   (0xFFFFFF, 0xFFFFFF, 0x000000),
+}
+
+
+def _lxmon_color_family(pkt: bytes) -> str:
+    if len(pkt) <= LOX_HEADER_LEN:
+        return "http"
+    if pkt[28] == 3:
+        # Ping-Ergebnis mit Ziel-IP ("..\0\0\x01192.168…") grau, andere Binärdaten Standard
+        return "icmp" if pkt[32:34] == b"\x00\x01" else "default"
+    raw = pkt[29:30 + 8]
+    if raw.startswith(b"HTTP") and not raw.startswith(b"HTTP/"):
+        return "http"
+    if raw.startswith(b"TCP"):
+        return "tcp"
+    if raw.startswith(b"ICMP"):
+        return "icmp"
+    if raw.startswith(b"FS "):
+        return "fs"
+    if raw.startswith(b"DNS "):
+        return "dns"
+    if raw.startswith(b"\x00"):
+        return "blank"
+    return "default"
+
+
+def lxmon_record(pkt: bytes, index: int, when: datetime, src_ip: bytes = b"") -> bytes:
+    even_bg, odd_bg, fg = _LXMON_COLORS[_lxmon_color_family(pkt)]
+    bg = odd_bg if index & 1 else even_bg
+    systime = struct.pack("<8H", when.year, when.month, (when.weekday() + 1) % 7, when.day,
+                          when.hour, when.minute, when.second, when.microsecond // 1000)
+    return ((_LXMON_CLASS if index == 0 else _LXMON_CLASSREF)
+            + struct.pack("<I", 11) + systime
+            + struct.pack("<III", 0, bg, fg)
+            + b"\xff\xfe\xff\x00"                    # leerer Unicode-CString
+            + (src_ip or pkt[16:20])                 # Absender-IP
+            + b"\x00" * 16
+            + struct.pack("<iI", -1, 0)
+            + struct.pack("<H", len(pkt)) + pkt)
+
+
+def lxmon_append(path: str, count: int, pkts: list, when: datetime, src_ip: str = "") -> int:
+    """Hängt Pakete an eine .LxMon-Datei an und aktualisiert den Zeilenzähler. Gibt neuen Zähler zurück."""
+    p = Path(path)
+    try:
+        src = socket.inet_aton(src_ip) if src_ip else b""
+    except OSError:
+        src = b""
+    body = b"".join(lxmon_record(pk, count + i, when, src) for i, pk in enumerate(pkts))
+    count += len(pkts)
+    if not p.exists():
+        p.write_bytes(struct.pack("<IH", 10, count) + body)
+        return count
+    with open(p, "r+b") as f:
+        f.seek(0, 2)
+        f.write(body)
+        f.seek(4)
+        f.write(struct.pack("<H", count))
+    return count
+
+
+def write_stream_meta(s: dict):
+    try:
+        meta = {"ip": s["ip"], "ext_ip": s.get("ext_ip", ""), "serial": s.get("serial", ""),
+                "mac_tail": s.get("mac_tail", "")}
+        (Path(s["logfile"]).parent / "stream.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def read_stream_meta(folder_path: Path) -> dict:
+    try:
+        return json.loads((folder_path / "stream.json").read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 # ── Startup: vorhandene Log-Ordner als beendete Sessions laden ────────────
 def _load_existing_sessions():
@@ -545,15 +731,17 @@ def _load_existing_sessions():
         log_files = sorted(folder.glob("*.log"), key=lambda f: f.stat().st_mtime)
         if not log_files:
             continue
-        total_bytes = sum(f.stat().st_size for f in log_files)
-        end_mtime   = log_files[-1].stat().st_mtime
+        total_bytes = sum(f.stat().st_size for f in log_files_in(folder))
+        end_mtime   = max(f.stat().st_mtime for f in log_files_in(folder))
         end_dt      = datetime.fromtimestamp(end_mtime)
+        meta        = read_stream_meta(folder)
         with _lock:
-            # Nicht doppelt laden falls bereits aktiv
-            if ip_part in active_streams:
-                continue
             completed_streams.append({
-                "ip":            ip_part,
+                "ip":            meta.get("ip") or ip_part,
+                "ext_ip":        meta.get("ext_ip", ""),
+                "serial":        meta.get("serial", ""),
+                "mac_tail":      meta.get("mac_tail", ""),
+                "has_meta":      bool(meta),
                 "folder":        name,
                 "logfile":       str(log_files[-1]),
                 "last_seen":     end_mtime,
@@ -598,66 +786,142 @@ def udp_listener():
     while True:
         try:
             data, (ext_ip, _) = sock.recvfrom(65535)
-            now = time.time()
-            # Interne Miniserver-IP aus Paket-Header extrahieren (hinter NAT)
-            internal_ip = extract_miniserver_ip(data) or ext_ip
-            with _lock:
-                if ext_ip not in active_streams:
-                    safe_ip     = internal_ip.replace(":", "_")
-                    ts          = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                    folder_name = f"{safe_ip}_{ts}"
-                    ip_dir      = LOG_BASE_DIR / folder_name
-                    ip_dir.mkdir(parents=True, exist_ok=True)
-                    logfile = ip_dir / f"{ts}.log"
-                    active_streams[ext_ip] = {
-                        "ip":            internal_ip,   # interne IP für Anzeige/Logs
-                        "ext_ip":        ext_ip,        # externe IP (UDP-Quelle, nur intern)
-                        "folder":        folder_name,
-                        "logfile":       str(logfile),
-                        "last_seen":     now,
-                        "bytes_written": 0,
-                        "start_time":    datetime.now().isoformat(),
-                    }
-                    print(f"[UDP] Neuer Stream von {internal_ip} (ext: {ext_ip})  >>  {logfile}")
-                    add_audit("Stream gestartet", f"IP: {internal_ip}  Ordner: {folder_name}", user="System")
-                s = active_streams[ext_ip]
-                # Interne IP nachträglich aktualisieren falls erstes Paket kein RFC1918 lieferte
-                if internal_ip != ext_ip and s["ip"] == ext_ip:
-                    s["ip"] = internal_ip
-                s["last_seen"] = now
-                ts   = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                # Pro Paket die interne IP verwenden — jede Meldung kann von
-                # einer anderen Miniserver-IP stammen (Gateway/Client-System)
-                display_ip = internal_ip
-                # Log-Datei rotieren falls Größenlimit erreicht
-                max_mb = load_settings().get("max_log_size_mb", 10)
-                if max_mb > 0:
-                    try:
-                        if Path(s["logfile"]).stat().st_size >= max_mb * 1024 * 1024:
-                            ip_dir   = Path(s["logfile"]).parent
-                            # Neuen Dateinamen mit aktuellem Timestamp erstellen
-                            new_ts   = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                            new_log  = ip_dir / f"{new_ts}.log"
-                            idx      = 2
-                            while new_log.exists():
-                                new_log = ip_dir / f"{new_ts}_{idx}.log"
-                                idx += 1
-                            s["logfile"] = str(new_log)
-                            print(f"[UDP] Log rotiert: {s['logfile']}")
-                    except OSError:
-                        pass
-                msgs = extract_messages(data)
-                if msgs:
-                    with open(s["logfile"], "a", encoding="utf-8") as f:
-                        for msg in msgs:
-                            line = f"{ts}  {display_ip}  {msg}\n"
-                            f.write(line)
-                            # Tatsächlich geschriebene Bytes zählen (konsistent mit Ordner-Ansicht)
-                            s["bytes_written"] += len(line.encode("utf-8"))
         except socket.timeout:
-            pass
+            continue
         except Exception as e:
             print(f"[UDP] Fehler: {e}")
+            continue
+        try:
+            _handle_datagram(data, ext_ip)
+        except Exception as e:
+            print(f"[UDP] Fehler: {e}")
+
+
+def _new_stream(key: str, ip: str, ext_ip: str, now: float) -> dict:
+    safe_ip     = ip.replace(":", "_")
+    ts          = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    folder_name = f"{safe_ip}_{ts}"
+    idx = 2
+    while (LOG_BASE_DIR / folder_name).exists():          # Gateway + Client in derselben Sekunde
+        folder_name = f"{safe_ip}-{idx}_{ts}"
+        idx += 1
+    ip_dir = LOG_BASE_DIR / folder_name
+    ip_dir.mkdir(parents=True, exist_ok=True)
+    s = {
+        "key":           key,
+        "ip":            ip,          # IP des sendenden Miniservers (aus Paket-Header)
+        "ext_ip":        ext_ip,      # UDP-Quelle (nach NAT, nur intern)
+        "folder":        folder_name,
+        "logfile":       str(ip_dir / f"{ts}.log"),
+        "lxmon":         str(ip_dir / f"{ts}.LxMon"),
+        "lxmon_count":   0,
+        "serial":        "",
+        "mac_tail":      "",
+        "last_seen":     now,
+        "bytes_written": 0,
+        "start_time":    datetime.now().isoformat(),
+    }
+    print(f"[UDP] Neuer Stream von {ip} (ext: {ext_ip})  >>  {s['logfile']}")
+    add_audit("Stream gestartet", f"IP: {ip}  Ordner: {folder_name}", user="System")
+    write_stream_meta(s)
+    return s
+
+
+def _rotate_if_needed(s: dict):
+    max_mb = load_settings().get("max_log_size_mb", 10)
+    too_big = False
+    if max_mb > 0:
+        try:
+            too_big = Path(s["logfile"]).stat().st_size >= max_mb * 1024 * 1024
+        except OSError:
+            pass
+    if not too_big and s["lxmon_count"] < LXMON_MAX_LINES:
+        return
+    ip_dir = Path(s["logfile"]).parent
+    new_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    base, idx = new_ts, 2
+    while (ip_dir / f"{base}.log").exists() or (ip_dir / f"{base}.LxMon").exists():
+        base = f"{new_ts}_{idx}"
+        idx += 1
+    s["logfile"]     = str(ip_dir / f"{base}.log")
+    s["lxmon"]       = str(ip_dir / f"{base}.LxMon")
+    s["lxmon_count"] = 0
+    print(f"[UDP] Log rotiert: {s['logfile']}")
+
+
+def _resolve_unknown_sender(ext_ip: str, mac_tail: str) -> str:
+    """Paket ohne IP im Header (18 f9 mit 255.255.255.255): Stream derselben UDP-Quelle
+    mit passendem MAC-Endbyte, sonst den zuletzt aktiven Stream dieser Quelle verwenden."""
+    with _lock:
+        cands = [s for s in active_streams.values() if s.get("ext_ip") == ext_ip]
+    if mac_tail:
+        for s in cands:
+            if s.get("mac_tail", "").endswith(mac_tail):
+                return s["ip"]
+    if cands:
+        return max(cands, key=lambda s: s["last_seen"])["ip"]
+    return ext_ip
+
+
+def _handle_datagram(data: bytes, ext_ip: str):
+    now     = time.time()
+    now_dt  = datetime.now()
+    ts      = now_dt.strftime("%H:%M:%S.%f")[:-3]
+    pkts    = split_lox_packets(data)
+
+    # Pakete nach sendendem Miniserver gruppieren (IP im Header, nicht UDP-Quelle)
+    groups: dict = {}
+    if pkts:
+        for pk in pkts:
+            info = parse_lox_packet(pk)
+            if info["ip"] is None:
+                info["ip"] = _resolve_unknown_sender(ext_ip, info["mac_tail"])
+            groups.setdefault(info["ip"], []).append((pk, info))
+    else:
+        # Unbekanntes/älteres Format: alter Text-Extraktor, UDP-Quelle als IP
+        groups[ext_ip] = [(None, {"ip": ext_ip, "mac_tail": "", "text": m}) for m in extract_messages(data)]
+
+    with _lock:
+        for ip, items in groups.items():
+            if not items:
+                continue
+            key = f"{ext_ip}|{ip}"
+            s = active_streams.get(key)
+            if s is None:
+                s = active_streams[key] = _new_stream(key, ip, ext_ip, now)
+            s["last_seen"] = now
+            _rotate_if_needed(s)
+
+            meta_changed = False
+            lines = []
+            for pk, info in items:
+                if len(info["mac_tail"]) > len(s["mac_tail"]):   # 1f fa liefert 2 Bytes, 18 f9 nur 1
+                    s["mac_tail"] = info["mac_tail"]
+                    meta_changed = True
+                text = info["text"]
+                if text:
+                    if not s["serial"]:
+                        sn = find_own_serial(text, ip, s["mac_tail"])
+                        if sn:
+                            s["serial"] = sn
+                            meta_changed = True
+                            print(f"[UDP] Seriennummer {ip}: {sn}")
+                    if _is_valid_msg(text) or pk is not None:
+                        lines.append(f"{ts}  {ip}  {text}\n")
+            if meta_changed:
+                write_stream_meta(s)
+
+            if lines:
+                chunk = "".join(lines).encode("utf-8")
+                with open(s["logfile"], "ab") as f:
+                    f.write(chunk)
+                s["bytes_written"] += len(chunk)
+
+            raw = [pk for pk, _ in items if pk is not None]
+            if raw:
+                before = Path(s["lxmon"]).stat().st_size if s["lxmon_count"] else 0
+                s["lxmon_count"] = lxmon_append(s["lxmon"], s["lxmon_count"], raw, now_dt, s["ip"])
+                s["bytes_written"] += Path(s["lxmon"]).stat().st_size - before
 
 _last_cleanup = 0.0
 _last_storage_check = 0.0
@@ -1210,7 +1474,7 @@ document.addEventListener('change', function(e) {
             age     = int(now - s["last_seen"])
             dur     = int(now - datetime.fromisoformat(s["start_time"]).timestamp())
             folder  = s.get("folder", s["ip"].replace(":", "_"))
-            serials = find_serials(s["logfile"])
+            serials = stream_serials(s)
             rows += f"""
             <tr>
               <td><span class="badge badge-green"><span class="pulse pulse-green"></span>{t('badge_active')}</span></td>
@@ -1225,7 +1489,7 @@ document.addEventListener('change', function(e) {
                 <div class="actions">
                   <a class="btn btn-sm btn-outline" href="{url_for('files', folder=folder)}">{t('btn_folder')}</a>
                   <a class="btn btn-sm btn-primary" href="{url_for('download_folder', folder=folder)}">{t('btn_zip')}</a>
-                  <a class="btn btn-sm btn-success" href="{url_for('live_stream', ip=s['ip'])}">{t('btn_live')}</a>
+                  <a class="btn btn-sm btn-success" href="{url_for('live_stream', ip=s['ip'], folder=folder)}">{t('btn_live')}</a>
                   <button class="btn btn-sm btn-danger" disabled title="{t('err_delete_active')}"
                           style="opacity:.4;cursor:not-allowed">{t('btn_delete')}</button>
                 </div>
@@ -1276,7 +1540,7 @@ document.addEventListener('change', function(e) {
             except Exception:
                 pass
             folder  = s.get("folder", s["ip"].replace(":", "_"))
-            serials = find_serials(s["logfile"])
+            serials = stream_serials(s)
             rows += f"""
             <tr>
               <td><span class="badge badge-gray"><span class="pulse pulse-gray"></span>{t('badge_ended')}</span></td>
@@ -1355,7 +1619,7 @@ def files():
         entries = []
         for d in sorted(LOG_BASE_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
             if d.is_dir():
-                logs   = list(d.glob("*.log"))
+                logs   = log_files_in(d)
                 size   = sum(f.stat().st_size for f in logs)
                 disp_ip, disp_dt = _parse_folder(d.name)
                 entries.append((d.name, disp_ip, disp_dt, len(logs), size))
@@ -1412,7 +1676,7 @@ def files():
         flash(t("files_not_found"), "error")
         return redirect(url_for("files"))
 
-    logs = sorted(ip_dir.glob("*.log"), key=lambda f: f.stat().st_mtime, reverse=True)
+    logs = sorted(log_files_in(ip_dir), key=lambda f: f.stat().st_mtime, reverse=True)
     disp_ip, disp_dt = _parse_folder(folder)
     display_ip = (f"{disp_ip}"
                   + (f" &nbsp;<span style='font-size:13px;font-weight:400;color:var(--muted)'>{disp_dt}</span>"
@@ -1510,7 +1774,7 @@ def download_folder(folder: str):
     if not ip_dir.is_dir():
         abort(404)
 
-    logs = list(ip_dir.glob("*.log"))
+    logs = log_files_in(ip_dir)
     if not logs:
         flash(t("files_no_dl"), "error")
         return redirect(url_for("files", folder=folder))
@@ -1581,14 +1845,16 @@ def delete_folder():
 @app.route("/live/<path:ip>")
 @login_req
 def live_stream(ip: str):
+    want_folder = request.args.get("folder", "")
     with _lock:
-        active_s = _stream_by_display_ip(ip)
+        active_s = _stream_by_display_ip(ip, want_folder)
         is_active = active_s is not None
         if is_active:
             logfile = active_s["logfile"]
             folder  = active_s.get("folder", ip.replace(".", "_"))
         else:
-            match   = next((s for s in completed_streams if s["ip"] == ip), None)
+            match   = (next((s for s in completed_streams if want_folder and s.get("folder") == want_folder), None)
+                       or next((s for s in completed_streams if s["ip"] == ip), None))
             logfile = match["logfile"] if match else None
             folder  = match.get("folder", ip.replace(".", "_")) if match else ip.replace(".", "_")
 
@@ -1632,7 +1898,7 @@ def live_stream(ip: str):
     var ip = {json.dumps(ip)};
     var active = {'true' if is_active else 'false'};
     function fetchLines() {{
-      fetch('/api/tail/' + encodeURIComponent(ip) + '?after=' + lastCount)
+      fetch('/api/tail/' + encodeURIComponent(ip) + '?after=' + lastCount + '&folder=' + encodeURIComponent({json.dumps(folder)}))
         .then(function(r){{ return r.json(); }})
         .then(function(d){{
           var term = document.getElementById('terminal');
@@ -1669,12 +1935,14 @@ def live_stream(ip: str):
 @login_req
 def api_tail(ip: str):
     after = int(request.args.get("after", 0))
+    want_folder = request.args.get("folder", "")
     with _lock:
-        active_s  = _stream_by_display_ip(ip)
+        active_s  = _stream_by_display_ip(ip, want_folder)
         is_active = active_s is not None
         logfile   = active_s["logfile"] if is_active else None
         if not is_active:
-            match = next((s for s in completed_streams if s["ip"] == ip), None)
+            match = (next((s for s in completed_streams if want_folder and s.get("folder") == want_folder), None)
+                     or next((s for s in completed_streams if s["ip"] == ip), None))
             logfile = match["logfile"] if match else None
 
     if not logfile or not Path(logfile).is_file():

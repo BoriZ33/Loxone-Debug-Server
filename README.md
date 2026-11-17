@@ -61,9 +61,11 @@ The user interface is fully available in **German** and **English**.
 
 The server listens on **UDP port 7777** for incoming debug packets from the Loxone Miniserver.
 
-- Loxone binary protocol is automatically decoded (`\x00\x1f\x1f` terminator)
-- Internal Miniserver IP is extracted from each packet header — works correctly behind NAT
-- Each message is logged with the IP of the Miniserver that sent it (multiple Miniservers per stream supported)
+- Loxone binary protocol is decoded by its fixed header (`1f fa` Miniserver / `18 f9` Linux subsystem)
+- The **sender IP** is read from the packet header (offset 16) — correct behind NAT/VPN
+- Gateway and client Miniservers get **separate streams**, even when they arrive from the same public IP
+- The **serial number (MAC)** of each sender is determined from the packet header (last MAC bytes) and confirmed via log messages (e.g. `192-168-178-210.504F94D019C2.dyndns…`)
+- Every session is written twice: a readable `.log` and a **`.LxMon` file in the exact Loxone Config format** (open it in Loxone Config → Monitor)
 - Each session gets its own folder in the format `IP_DATE_TIME`  
   (e.g. `192.168.1.100_2026-04-25_14-30-00`)
 - Streams that have not sent data for more than X seconds are considered ended (configurable)
@@ -82,7 +84,7 @@ Real-time overview of all active and ended debug streams.
 | Runtime / Duration | How long the stream has been / was running (auto-formatted: s / min s / h min s) |
 | Last Packet | How many seconds ago data was last received |
 | Volume | Amount of data received |
-| Serial Numbers | Up to 3 detected Loxone device serial numbers (`504F94...`) found in the log — air devices (`504F94FFFE...`) are excluded |
+| Serial Number | Serial number (= MAC) of the sending Miniserver. Shown as `504F94··19C2` until the full number has been seen in a log message |
 | Assigned To | User responsible for this session — select from dropdown, saved instantly |
 
 **Actions per stream:**
@@ -187,7 +189,9 @@ UDP/
 ├── assignments.json    # Session user assignments (auto-created)
 └── logs/
     └── 192.168.1.100_2026-04-25_14-30-00/
-        └── 2026-04-25_14-30-00.log
+        ├── 2026-04-25_14-30-00.log     # readable text log
+        ├── 2026-04-25_14-30-00.LxMon   # Loxone Config monitor file (byte-identical format)
+        └── stream.json                 # sender IP, external IP, serial number
 ```
 
 > `users.json`, `settings.json`, `audit.json`, `assignments.json` and the `logs/` folder are listed in `.gitignore` and are not uploaded to the repository.
@@ -208,7 +212,7 @@ In Loxone Config under **Miniserver → Settings → Logging & Monitoring**:
 
 - **Backend:** Python 3, Flask
 - **Frontend:** Vanilla HTML/CSS/JS, Loxone corporate design (`#69A533`)
-- **Protocol:** Loxone UDP debug binary format — text extracted via `\x00\x1f\x1f` terminator with backward scan; internal Miniserver IP extracted from packet header (RFC1918 scan)
+- **Protocol:** Loxone UDP debug binary format — fixed 28-byte header (sender IP at offset 16, MAC tail at 24–25), text from offset 29; `.LxMon` = MFC CArchive of `CCommonLogDataLine` objects incl. Loxone Config's row colours (verified byte-identical against ~827,000 lines from real Loxone Config files)
 - **Authentication:** Session-based, passwords hashed with SHA-256 + random salt
 - **Threading:** UDP listener and stream monitor run as daemon threads
 - **Path safety:** All file accesses are checked against path traversal attacks
@@ -216,6 +220,13 @@ In Loxone Config under **Miniserver → Settings → Logging & Monitoring**:
 ---
 
 ## Changelog
+
+### V1.07
+- **LxMon export:** Each stream is additionally written as a `.LxMon` file in exactly the format Loxone Config uses (header, CArchive records, timestamps, row colours, original packets) — can be opened directly in Loxone Config
+- **Correct sender IP:** IP is read from the fixed header position instead of scanning for RFC1918-like bytes (which produced bogus IPs such as `10.241.58.1`)
+- **Gateway / client separation:** Streams are keyed by external IP + sender IP, so every Miniserver gets its own folder
+- **Correct serial number:** The serial (MAC) of the sending Miniserver is derived from the packet header and confirmed in the log text, instead of listing the first serial numbers found in any message
+- Multiple Loxone packets in one UDP datagram are split correctly; texts are decoded as UTF-8 with cp1252 fallback (umlauts)
 
 ### V1.06
 - **Runtime formatting:** Durations are now human-readable — under 60 s shown as `45 s`, under 1 h as `2 min 30 s`, above 1 h as `1h 30min 45s`
